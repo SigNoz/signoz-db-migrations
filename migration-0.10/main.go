@@ -250,7 +250,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
+	moveTTL, err := getTracesTTL(conn)
+	if err == nil {
+		setTracesTTL(conn, moveTTL)
+	}
 	rows, err := readTotalRows(conn)
 	if err != nil {
 		log.Fatal(err)
@@ -299,10 +302,6 @@ func main() {
 			}
 			start -= timePeriod
 		}
-	}
-	moveTTL, err := getTracesTTL(conn)
-	if err == nil {
-		setTracesTTL(conn, moveTTL)
 	}
 	fmt.Println("Completed migration in: ", time.Since(start))
 	if *dropOldTable {
