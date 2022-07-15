@@ -175,7 +175,7 @@ func dropOldTables(conn clickhouse.Conn) {
 	fmt.Println("Dropping signoz_error_index table")
 	err := conn.Exec(ctx, "DROP TABLE IF EXISTS signoz_traces.signoz_error_index")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(err, " Error dropping signoz_error_index_v2 table")
 	}
 	fmt.Println("Successfully dropped signoz_error_index")
 }
@@ -209,7 +209,6 @@ func getTracesTTL(conn clickhouse.Conn) (int, error) {
 		zap.S().Error(fmt.Errorf("error while getting ttl. Err=%v", err))
 		return 0, err
 	}
-	fmt.Println("TTL: ", dbResp[0].EngineFull)
 	if len(dbResp) == 0 {
 		return -1, fmt.Errorf("no ttl found")
 	} else {
@@ -248,20 +247,29 @@ func main() {
 
 	conn, err := connect(*hostFlag, *portFlag, *userNameFlag, *passwordFlag)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(err, " Error while connecting to clickhouse")
+		return
 	}
 	moveTTL, err := getTracesTTL(conn)
-	if err == nil {
+	if err == nil && moveTTL > 1 {
 		setTracesTTL(conn, moveTTL)
+	} else {
+		fmt.Println("No TTL found, skipping TTL migration")
 	}
 	rows, err := readTotalRows(conn)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(err, " error while reading total rows")
+		return
+	}
+	if rows == 0 {
+		fmt.Println("No data found in clickhouse")
+		return
 	}
 	fmt.Printf("There are total %v rows, starting migration... \n", rows)
 	services, err := readServices(conn)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(err, " error while reading services")
+		return
 	}
 	skip := true
 
@@ -290,13 +298,15 @@ func main() {
 		for start >= uint64(service.Mint.UnixNano()) {
 			batchSpans, err := readSpans(conn, service.ServiceName, start, start-timePeriod)
 			if err != nil {
-				log.Fatal(err)
+				log.Fatal(err, " error while reading spans")
+				return
 			}
 			if len(batchSpans) > 0 {
 				processedSpans := processSpans(batchSpans)
 				err = write(conn, processedSpans)
 				if err != nil {
-					log.Fatal(err)
+					log.Fatal(err, " error while writing spans")
+					return
 				}
 				fmt.Printf("ServiceName: %s \nMigrated till: %s \nTimeNano: %v \n_________**********************************_________ \n", service.ServiceName, time.Unix(0, int64(start-uint64(timePeriod))), start-uint64(timePeriod))
 			}
