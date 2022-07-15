@@ -117,7 +117,10 @@ func readTotalRows(conn clickhouse.Conn) (uint64, error) {
 	if err := conn.Select(ctx, &result, "SELECT count() as numTotal FROM signoz_traces.signoz_error_index"); err != nil {
 		return 0, err
 	}
-	fmt.Println("Total Rows: ", result[0].NumTotal)
+	if len(result) == 0 {
+		fmt.Println("Total Rows: ", result[0].NumTotal)
+		return 0, nil
+	}
 	return result[0].NumTotal, nil
 }
 
