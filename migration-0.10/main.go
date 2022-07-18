@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -266,7 +267,7 @@ func main() {
 	}
 	if rows == 0 {
 		fmt.Println("No data found in clickhouse")
-		return
+		os.Exit(0)
 	}
 	fmt.Printf("There are total %v rows, starting migration... \n", rows)
 	services, err := readServices(conn)
