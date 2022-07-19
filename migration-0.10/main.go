@@ -5,7 +5,6 @@ import (
 	"crypto/md5"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"regexp"
 	"strconv"
@@ -75,7 +74,7 @@ func connect(host string, port string, userName string, password string) (clickh
 	}
 	if err := conn.Ping(ctx); err != nil {
 		if exception, ok := err.(*clickhouse.Exception); ok {
-			fmt.Printf("Catch exception [%d] %s \n%s\n", exception.Code, exception.Message, exception.StackTrace)
+			zap.S().Info(fmt.Sprintf("Catch exception [%d] %s \n%s", exception.Code, exception.Message, exception.StackTrace))
 		}
 		return nil, err
 	}
@@ -119,7 +118,7 @@ func readTotalRows(conn clickhouse.Conn) (uint64, error) {
 		return 0, err
 	}
 	if len(result) == 0 {
-		fmt.Println("Total Rows: ", result[0].NumTotal)
+		zap.S().Info("Total Rows: ", result[0].NumTotal)
 		return 0, nil
 	}
 	return result[0].NumTotal, nil
@@ -145,7 +144,7 @@ func readSpans(conn clickhouse.Conn, serviceName string, endTime uint64, startTi
 }
 
 func write(conn clickhouse.Conn, batchSpans []SignozErrorIndexV2) error {
-	fmt.Printf("Writing %v rows\n", len(batchSpans))
+	zap.S().Info(fmt.Sprintf("Writing %v rows", len(batchSpans)))
 	err := writeErrorIndexV2(conn, batchSpans)
 	return err
 }
@@ -153,6 +152,10 @@ func write(conn clickhouse.Conn, batchSpans []SignozErrorIndexV2) error {
 func writeErrorIndexV2(conn clickhouse.Conn, batchSpans []SignozErrorIndexV2) error {
 	ctx := context.Background()
 	statement, err := conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO signoz_traces.signoz_error_index_v2"))
+	if err != nil {
+		zap.S().Error("Error preparing statement: ", err)
+		return err
+	}
 	for _, span := range batchSpans {
 		err = statement.Append(
 			span.Timestamp,
@@ -176,17 +179,17 @@ func writeErrorIndexV2(conn clickhouse.Conn, batchSpans []SignozErrorIndexV2) er
 
 func dropOldTables(conn clickhouse.Conn) {
 	ctx := context.Background()
-	fmt.Println("Dropping signoz_error_index table")
+	zap.S().Info("Dropping signoz_error_index table")
 	err := conn.Exec(ctx, "DROP TABLE IF EXISTS signoz_traces.signoz_error_index")
 	if err != nil {
-		log.Fatal(err, " Error dropping signoz_error_index_v2 table")
+		zap.S().Fatal(err, "Error dropping signoz_error_index_v2 table")
 	}
-	fmt.Println("Successfully dropped signoz_error_index")
+	zap.S().Info("Successfully dropped signoz_error_index")
 }
 
 func parseTTL(queryResp string) int {
 
-	zap.S().Debugf("Parsing TTL from: %s", queryResp)
+	zap.S().Debug(fmt.Sprintf("Parsing TTL from: %s", queryResp))
 	deleteTTLExp := regexp.MustCompile(`toIntervalSecond\(([0-9]*)\)`)
 
 	var delTTL int = -1
@@ -222,13 +225,13 @@ func getTracesTTL(conn clickhouse.Conn) (int, error) {
 }
 
 func setTracesTTL(conn clickhouse.Conn, delTTL int) error {
-	fmt.Printf("Setting TTL to %v\nSetting TTL might take very long depending upon data and resources, please be patient....\n", delTTL)
+	zap.S().Info(fmt.Sprintf("Setting TTL to %v\nSetting TTL might take very long depending upon data and resources, please be patient...", delTTL))
 	tableName := "signoz_traces.signoz_error_index_v2"
 	req := fmt.Sprintf(
 		"ALTER TABLE %v MODIFY TTL toDateTime(timestamp) + INTERVAL %v SECOND DELETE",
 		tableName, delTTL*3600)
 
-	zap.S().Debugf("Executing TTL request: %s\n", req)
+	zap.S().Debug(fmt.Sprintf("Executing TTL request: %s", req))
 	if err := conn.Exec(context.Background(), req); err != nil {
 		zap.S().Error(fmt.Errorf("Error in executing set TTL query: %s", err.Error()))
 		return err
@@ -237,8 +240,13 @@ func setTracesTTL(conn clickhouse.Conn, delTTL int) error {
 }
 
 func main() {
+	logger, _ := zap.NewDevelopment()
+	defer logger.Sync()
+	undo := zap.ReplaceGlobals(logger)
+	defer undo()
+
 	start := time.Now()
-	timePeriod := uint64(60000000000) // seconds
+	timePeriod := uint64(60000000000) // nanoseconds
 	serviceFlag := flag.String("service", "", "serviceName")
 	timeFlag := flag.Uint64("timeNano", 0, "timestamp in nano seconds")
 	hostFlag := flag.String("host", "127.0.0.1", "clickhouse host")
@@ -247,32 +255,31 @@ func main() {
 	passwordFlag := flag.String("password", "", "clickhouse password")
 	dropOldTable := flag.Bool("dropOldTable", true, "clear old clickhouse data if migration was successful")
 	flag.Parse()
-	fmt.Println(*hostFlag, *portFlag, *userNameFlag, *passwordFlag)
+	zap.S().Debug(fmt.Sprintf("Params: %s %s %s %s", *hostFlag, *portFlag, *userNameFlag, *passwordFlag))
 
 	conn, err := connect(*hostFlag, *portFlag, *userNameFlag, *passwordFlag)
 	if err != nil {
-		log.Fatal(err, " Error while connecting to clickhouse")
-		return
+		zap.S().Fatal("Error while connecting to clickhouse", zap.Error(err))
 	}
 	moveTTL, err := getTracesTTL(conn)
 	if err == nil && moveTTL > 1 {
 		setTracesTTL(conn, moveTTL)
 	} else {
-		fmt.Println("No TTL found, skipping TTL migration")
+		zap.S().Info("No TTL found, skipping TTL migration")
 	}
 	rows, err := readTotalRows(conn)
 	if err != nil {
-		log.Fatal(err, " error while reading total rows")
+		zap.S().Error(err, "error while reading total rows")
 		return
 	}
 	if rows == 0 {
-		fmt.Println("No data found in clickhouse")
+		zap.S().Info("No data found in clickhouse")
 		os.Exit(0)
 	}
-	fmt.Printf("There are total %v rows, starting migration... \n", rows)
+	zap.S().Info(fmt.Sprintf("There are total %v rows, starting migration...", rows))
 	services, err := readServices(conn)
 	if err != nil {
-		log.Fatal(err, " error while reading services")
+		zap.S().Fatal(err, "error while reading services")
 		return
 	}
 	skip := true
@@ -284,40 +291,40 @@ func main() {
 			if service.ServiceName != *serviceFlag {
 				continue
 			} else {
-				fmt.Println("Starting from service: ", service.ServiceName)
+				zap.S().Info("Starting from service: ", service.ServiceName)
 				skip = false
 				if *timeFlag != 0 {
 					start = *timeFlag
-					fmt.Printf("\nProcessing remaining rows of serviceName: %s and Timestamp: %s \n", service.ServiceName, time.Unix(0, int64(start)))
+					zap.S().Info(fmt.Sprintf("Processing remaining rows of serviceName: %s and Timestamp: %s", service.ServiceName, time.Unix(0, int64(start))))
 				}
 			}
 		}
 		if skip {
-			fmt.Printf("\nProcessing %v rows of serviceName %s \n", service.NumTotal, service.ServiceName)
+			zap.S().Info(fmt.Sprintf("Processing %v rows of serviceName %s", service.NumTotal, service.ServiceName))
 		}
 		rps := service.NumTotal / ((uint64(service.Maxt.Unix()) - uint64(service.Mint.Unix())) + 1)
-		// fmt.Printf("\nRPS: %v \n", rps)
+		zap.S().Info(fmt.Sprintf("RPS: %v", rps))
 		timePeriod = 70000000000000 / (rps + 1)
-		// fmt.Printf("\nTime Period: %v \n", timePeriod)
+		zap.S().Info(fmt.Sprintf("Time Period (nS): %v", timePeriod))
 		for start >= uint64(service.Mint.UnixNano()) {
 			batchSpans, err := readSpans(conn, service.ServiceName, start, start-timePeriod)
 			if err != nil {
-				log.Fatal(err, " error while reading spans")
+				zap.S().Fatal(err, "error while reading spans")
 				return
 			}
 			if len(batchSpans) > 0 {
 				processedSpans := processSpans(batchSpans)
 				err = write(conn, processedSpans)
 				if err != nil {
-					log.Fatal(err, " error while writing spans")
+					zap.S().Fatal(err, "error while writing spans")
 					return
 				}
-				fmt.Printf("ServiceName: %s \nMigrated till: %s \nTimeNano: %v \n_________**********************************_________ \n", service.ServiceName, time.Unix(0, int64(start-uint64(timePeriod))), start-uint64(timePeriod))
+				zap.S().Info(fmt.Sprintf("ServiceName: %s \nMigrated till: %s \nTimeNano: %v \n_________**********************************_________", service.ServiceName, time.Unix(0, int64(start-uint64(timePeriod))), start-uint64(timePeriod)))
 			}
 			start -= timePeriod
 		}
 	}
-	fmt.Println("Completed migration in: ", time.Since(start))
+	zap.S().Info(fmt.Sprintf("Completed migration in: %s", time.Since(start)))
 	if *dropOldTable {
 		dropOldTables(conn)
 	}
