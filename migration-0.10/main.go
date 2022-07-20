@@ -156,7 +156,9 @@ func writeErrorIndexV2(conn clickhouse.Conn, batchSpans []SignozErrorIndexV2) er
 		zap.S().Error("Error preparing statement: ", err)
 		return err
 	}
+	zap.S().Debug("Length of batchSpans: ", len(batchSpans))
 	for _, span := range batchSpans {
+		zap.S().Debug("Writing span: ", span)
 		err = statement.Append(
 			span.Timestamp,
 			span.ErrorID,
