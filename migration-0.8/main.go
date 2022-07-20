@@ -248,9 +248,16 @@ func write(conn clickhouse.Conn, batchSpans []SignozIndexV2) error {
 func writeIndex(conn clickhouse.Conn, batchSpans []SignozIndexV2) error {
 	ctx := context.Background()
 	statement, err := conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO signoz_traces.signoz_index_v2"))
+	if err != nil {
+		log.Println("Error preparing statement of write index: ", err)
+		return err
+	}
 	for _, span := range batchSpans {
+		log.Println("Span: ", span)
+		unixNano := time.Unix(0, int64(span.StartTimeUnixNano))
+		log.Println("Unix: ", unixNano)
 		err = statement.Append(
-			time.Unix(0, int64(span.StartTimeUnixNano)),
+			unixNano,
 			span.TraceId,
 			span.SpanId,
 			span.ParentSpanId,
@@ -290,6 +297,10 @@ func writeIndex(conn clickhouse.Conn, batchSpans []SignozIndexV2) error {
 func writeModel(conn clickhouse.Conn, batchSpans []SignozIndexV2) error {
 	ctx := context.Background()
 	statement, err := conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO signoz_traces.signoz_spans"))
+	if err != nil {
+		log.Println("Error preparing statement of write model: ", err)
+		return err
+	}
 	for _, span := range batchSpans {
 		var serialized []byte
 
