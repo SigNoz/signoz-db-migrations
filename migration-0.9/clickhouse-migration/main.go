@@ -21,6 +21,11 @@ type DBResponseTotal struct {
 	NumTotal uint64 `ch:"numTotal"`
 }
 
+type DBResponseMinMaxTS struct {
+	MinTS int64 `ch:"minTS"`
+	MaxTs int64 `ch:"maxTs"`
+}
+
 type Samples struct {
 	TimeStamp   int64   `ch:"timestamp_ms"`
 	Fingerprint uint64  `ch:"fingerprint"`
@@ -94,24 +99,41 @@ func readTotalRowsTimeSeries(conn clickhouse.Conn) (uint64, error) {
 	return result[0].NumTotal, nil
 }
 
+func readMinMaxTimestamps(conn clickhouse.Conn) (int64, int64, error) {
+	ctx := context.Background()
+	result := []DBResponseMinMaxTS{}
+	if err := conn.Select(ctx, &result, fmt.Sprintf("SELECT min(timestamp_ms) as minTS, max(timestamp_ms) as maxTs FROM %s", samplesTable)); err != nil {
+		return 0, 0, err
+	}
+	return result[0].MinTS, result[0].MaxTs, nil
+}
+
+func millisToDateTime(x int64) time.Time {
+	return time.Unix(0, x*int64(time.Millisecond))
+}
+
 func prepareTimeSeries(conn clickhouse.Conn) ([]TimeSeriesV2, error) {
 	fingerprintToName = make(map[uint64]string)
 	ctx := context.Background()
 	result := []TimeSeriesV2{}
+	fmt.Printf("Running time series fetch\n")
 	query := fmt.Sprintf("SELECT JSONExtractString(labels, '__name__') as metric_name, fingerprint, date, labels FROM %s", timeSeriesTable)
 	if err := conn.Select(ctx, &result, query); err != nil {
 		return nil, err
 	}
+	fmt.Printf("Fetched time series\n")
 	for _, item := range result {
 		fingerprintToName[item.Fingerprint] = item.MetricName
 	}
 	return result, nil
 }
 
-func prepareSamples(conn clickhouse.Conn) ([]SamplesV2, error) {
+func prepareSamples(conn clickhouse.Conn, x int64, hoursMillis int64) ([]SamplesV2, error) {
+	start, end := x, x+hoursMillis
+	fmt.Println("Fetching samples from ", millisToDateTime(start), " to ", millisToDateTime(end))
 	ctx := context.Background()
 	result := []Samples{}
-	query := fmt.Sprintf("SELECT * FROM %s", samplesTable)
+	query := fmt.Sprintf("SELECT * FROM %s where timestamp_ms >= %d AND timestamp_ms < %d;", samplesTable, start, end)
 	if err := conn.Select(ctx, &result, query); err != nil {
 		return nil, err
 	}
@@ -127,6 +149,7 @@ func prepareSamples(conn clickhouse.Conn) ([]SamplesV2, error) {
 		newItem.Value = item.Value
 		newResult = append(newResult, newItem)
 	}
+	fmt.Println("Fetched samples from ", millisToDateTime(start), " to ", millisToDateTime(end), " with ", len(newResult), " items")
 	return newResult, nil
 }
 
@@ -137,7 +160,7 @@ func writeSamples(conn clickhouse.Conn, batchSamples []SamplesV2) error {
 		return err
 	}
 	for i, sample := range batchSamples {
-		if i%1000 == 0 {
+		if i%100000 == 0 {
 			fmt.Printf("At %d the sample batch\n", i)
 		}
 		err = statement.Append(
@@ -216,12 +239,14 @@ func main() {
 	start := time.Now()
 	hostFlag := flag.String("host", "127.0.0.1", "clickhouse host")
 	portFlag := flag.String("port", "9000", "clickhouse port")
+	hoursFalg := flag.Int("hours", 24, "number of hours to fetch")
 	userNameFlag := flag.String("userName", "default", "clickhouse username")
 	passwordFlag := flag.String("password", "", "clickhouse password")
 	databaseFlag := flag.String("database", "signoz_metrics", "metrics database")
 	dropOldTable := flag.Bool("dropOldTable", true, "clear old clickhouse data if migration was successful")
 	flag.Parse()
 	fmt.Println(*hostFlag, *portFlag, *userNameFlag, *passwordFlag, *databaseFlag)
+	hoursMillis := int64(*hoursFalg) * 60 * 60 * 1000
 
 	conn, err := connect(*hostFlag, *portFlag, *userNameFlag, *passwordFlag, *databaseFlag)
 	if err != nil {
@@ -245,18 +270,28 @@ func main() {
 		log.Fatalf("Error while preparing time series: %s", err)
 	}
 
-	samples, err := prepareSamples(conn)
+	minTs, maxTs, err := readMinMaxTimestamps(conn)
 	if err != nil {
-		log.Fatalf("Error while preparing samples: %s", err)
-	}
-	fmt.Println("Writing samples to DB")
-	err = writeSamples(conn, samples)
-	if err != nil {
-		log.Fatalln("Error while writing samples to DB", err)
+		log.Fatalf("Error while reading min and max timestamps: %s", err)
 	}
 
-	fmt.Println("Written samples to DB")
+	fmt.Printf("Min timestamp: %v, Max timestamp: %v\n", minTs, maxTs)
 
+	var x int64
+	for x = minTs; x < maxTs; x += hoursMillis {
+
+		samples, err := prepareSamples(conn, x, hoursMillis)
+		if err != nil {
+			log.Fatalf("Error while preparing samples: %s", err)
+		}
+		fmt.Println("Writing samples to DB until ", millisToDateTime(x+hoursMillis))
+		err = writeSamples(conn, samples)
+		if err != nil {
+			log.Fatalln("Error while writing samples to DB", err)
+		}
+
+		fmt.Println("Written samples to DB until ", millisToDateTime(x+hoursMillis))
+	}
 	// Throwing unsupported column error, so we use clickhouse itself to move data
 
 	moveTimeSeries(conn)
