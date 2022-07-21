@@ -306,7 +306,7 @@ func main() {
 		}
 		rps := service.NumTotal / ((uint64(service.Maxt.Unix()) - uint64(service.Mint.Unix())) + 1)
 		zap.S().Info(fmt.Sprintf("RPS: %v", rps))
-		timePeriod = 70000000000000 / (rps + 1)
+		timePeriod = 60000000000 / (rps + 1)
 		zap.S().Info(fmt.Sprintf("Time Period (nS): %v", timePeriod))
 		for start >= uint64(service.Mint.UnixNano()) {
 			batchSpans, err := readSpans(conn, service.ServiceName, start, start-timePeriod)
