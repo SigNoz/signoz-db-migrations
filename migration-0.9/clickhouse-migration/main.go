@@ -160,8 +160,8 @@ func writeSamples(conn clickhouse.Conn, batchSamples []SamplesV2) error {
 		return err
 	}
 	for i, sample := range batchSamples {
-		if i%100000 == 0 {
-			fmt.Printf("At %d the sample batch\n", i)
+		if i%1000000 == 0 {
+			fmt.Printf("At %dth sample batch\n", i)
 		}
 		err = statement.Append(
 			sample.MetricsName,
@@ -239,7 +239,7 @@ func main() {
 	start := time.Now()
 	hostFlag := flag.String("host", "127.0.0.1", "clickhouse host")
 	portFlag := flag.String("port", "9000", "clickhouse port")
-	hoursFalg := flag.Int("hours", 24, "number of hours to fetch")
+	hoursFalg := flag.Int("hours", 1, "number of hours to fetch")
 	userNameFlag := flag.String("userName", "default", "clickhouse username")
 	passwordFlag := flag.String("password", "", "clickhouse password")
 	databaseFlag := flag.String("database", "signoz_metrics", "metrics database")
