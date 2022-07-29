@@ -200,7 +200,7 @@ func dropOldTables(conn clickhouse.Conn) {
 	zap.S().Info("Dropping signoz_error_index table")
 	err := conn.Exec(ctx, "DROP TABLE IF EXISTS signoz_traces.signoz_error_index")
 	if err != nil {
-		zap.S().Fatal(err, "Error dropping signoz_error_index_v2 table")
+		zap.S().Fatal(err, "Error dropping signoz_error_index table")
 	}
 	zap.S().Info("Successfully dropped signoz_error_index")
 }
