@@ -302,15 +302,18 @@ func main() {
 	}
 	skip := true
 
+	// Iterate over services and migrate data
 	for _, service := range services {
 		start := uint64(service.Maxt.UnixNano())
 
+		// If service is provided, start migration from that service
 		if *serviceFlag != "" && skip {
 			if service.ServiceName != *serviceFlag {
 				continue
 			} else {
 				zap.S().Info("Starting from service: ", service.ServiceName)
 				skip = false
+				// If time is provided, start migration from that time
 				if *timeFlag != 0 {
 					start = *timeFlag
 					zap.S().Info(fmt.Sprintf("Processing remaining rows of serviceName: %s and Timestamp: %s", service.ServiceName, time.Unix(0, int64(start))))
@@ -320,8 +323,11 @@ func main() {
 		if skip {
 			zap.S().Info(fmt.Sprintf("Processing %v rows of serviceName %s", service.NumTotal, service.ServiceName))
 		}
+		// Calculate average rows per second (rps)
 		rps := service.NumTotal / ((uint64(service.Maxt.Unix()) - uint64(service.Mint.Unix())) + 1)
 		zap.S().Info(fmt.Sprintf("RPS: %v", rps))
+
+		// Calculate time period for an average single batch
 		timePeriod := (*batchSize * 1000000000) / (rps + 1)
 		zap.S().Info(fmt.Sprintf("Time Period (nS): %v", timePeriod))
 		for start >= uint64(service.Mint.UnixNano()) {
@@ -334,8 +340,8 @@ func main() {
 				start -= timePeriod
 				continue
 			}
-			// fmt.Println("rows: ", rows)
-
+			
+			// If rows are more than batch size, then split them into batches
 			if rows >= *batchSize {
 				// fmt.Println("Rows: ", rows)
 				offset := int64(0)
