@@ -111,14 +111,20 @@ func stringToBool(s string) bool {
 	return false
 }
 
-func readTotalRows(conn clickhouse.Conn) (uint64, error) {
+func readTotalRows(conn clickhouse.Conn, serviceName string, startTime uint64, endTime uint64) (uint64, error) {
 	ctx := context.Background()
 	result := []DBResponseTotal{}
-	if err := conn.Select(ctx, &result, "SELECT count() as numTotal FROM signoz_traces.signoz_error_index"); err != nil {
-		return 0, err
+	if serviceName != "" {
+		te := fmt.Sprintf("SELECT count() as numTotal FROM signoz_traces.signoz_error_index where serviceName='%s' AND timestamp>= '%v' AND timestamp<= '%v'", serviceName, startTime, endTime)
+		if err := conn.Select(ctx, &result, te); err != nil {
+			return 0, err
+		}
+	} else {
+		if err := conn.Select(ctx, &result, "SELECT count() as numTotal FROM signoz_traces.signoz_error_index"); err != nil {
+			return 0, err
+		}
 	}
 	if len(result) == 0 {
-		zap.S().Info("Total Rows: ", result[0].NumTotal)
 		return 0, nil
 	}
 	return result[0].NumTotal, nil
@@ -133,10 +139,15 @@ func readServices(conn clickhouse.Conn) ([]DBResponseServices, error) {
 	return result, nil
 }
 
-func readSpans(conn clickhouse.Conn, serviceName string, endTime uint64, startTime uint64) ([]SignozErrorIndex, error) {
+func readSpans(conn clickhouse.Conn, serviceName string, endTime uint64, startTime uint64, limit int64, offset int64) ([]SignozErrorIndex, error) {
 	ctx := context.Background()
 	result := []SignozErrorIndex{}
-	te := fmt.Sprintf("SELECT * FROM signoz_traces.signoz_error_index where serviceName='%s' AND timestamp>= '%v' AND timestamp<= '%v'", serviceName, startTime, endTime)
+	te := ""
+	if limit != -1 {
+		te = fmt.Sprintf("SELECT * FROM signoz_traces.signoz_error_index where serviceName='%s' AND timestamp>= '%v' AND timestamp<= '%v' ORDER BY timestamp LIMIT %v OFFSET %v", serviceName, startTime, endTime, limit, offset)
+	} else {
+		te = fmt.Sprintf("SELECT * FROM signoz_traces.signoz_error_index where serviceName='%s' AND timestamp>= '%v' AND timestamp<= '%v'", serviceName, startTime, endTime)
+	}
 	if err := conn.Select(ctx, &result, te); err != nil {
 		return nil, err
 	}
@@ -156,7 +167,14 @@ func writeErrorIndexV2(conn clickhouse.Conn, batchSpans []SignozErrorIndexV2) er
 		zap.S().Error("Error preparing statement: ", err)
 		return err
 	}
+	// zap.S().Debug("Length of batchSpans: ", len(batchSpans))
 	for _, span := range batchSpans {
+		defer func() {
+			if err := recover(); err != nil {
+				fmt.Println(span)
+				zap.S().Fatal("panic occurred:", err)
+			}
+		}()
 		err = statement.Append(
 			span.Timestamp,
 			span.ErrorID,
@@ -182,7 +200,7 @@ func dropOldTables(conn clickhouse.Conn) {
 	zap.S().Info("Dropping signoz_error_index table")
 	err := conn.Exec(ctx, "DROP TABLE IF EXISTS signoz_traces.signoz_error_index")
 	if err != nil {
-		zap.S().Fatal(err, "Error dropping signoz_error_index_v2 table")
+		zap.S().Fatal(err, "Error dropping signoz_error_index table")
 	}
 	zap.S().Info("Successfully dropped signoz_error_index")
 }
@@ -246,7 +264,7 @@ func main() {
 	defer undo()
 
 	start := time.Now()
-	timePeriod := uint64(60000000000) // nanoseconds
+	batchSize := flag.Uint64("batchSize", 70000, "size of batch which is read and write to clickhouse")
 	serviceFlag := flag.String("service", "", "serviceName")
 	timeFlag := flag.Uint64("timeNano", 0, "timestamp in nano seconds")
 	hostFlag := flag.String("host", "127.0.0.1", "clickhouse host")
@@ -267,7 +285,7 @@ func main() {
 	} else {
 		zap.S().Info("No TTL found, skipping TTL migration")
 	}
-	rows, err := readTotalRows(conn)
+	rows, err := readTotalRows(conn, "", 0, 0)
 	if err != nil {
 		zap.S().Error(err, "error while reading total rows")
 		return
@@ -284,15 +302,18 @@ func main() {
 	}
 	skip := true
 
+	// Iterate over services and migrate data
 	for _, service := range services {
 		start := uint64(service.Maxt.UnixNano())
 
+		// If service is provided, start migration from that service
 		if *serviceFlag != "" && skip {
 			if service.ServiceName != *serviceFlag {
 				continue
 			} else {
 				zap.S().Info("Starting from service: ", service.ServiceName)
 				skip = false
+				// If time is provided, start migration from that time
 				if *timeFlag != 0 {
 					start = *timeFlag
 					zap.S().Info(fmt.Sprintf("Processing remaining rows of serviceName: %s and Timestamp: %s", service.ServiceName, time.Unix(0, int64(start))))
@@ -302,26 +323,67 @@ func main() {
 		if skip {
 			zap.S().Info(fmt.Sprintf("Processing %v rows of serviceName %s", service.NumTotal, service.ServiceName))
 		}
+		// Calculate average rows per second (rps)
 		rps := service.NumTotal / ((uint64(service.Maxt.Unix()) - uint64(service.Mint.Unix())) + 1)
 		zap.S().Info(fmt.Sprintf("RPS: %v", rps))
-		timePeriod = 70000000000000 / (rps + 1)
+
+		// Calculate time period for an average single batch
+		timePeriod := (*batchSize * 1000000000) / (rps + 1)
 		zap.S().Info(fmt.Sprintf("Time Period (nS): %v", timePeriod))
 		for start >= uint64(service.Mint.UnixNano()) {
-			batchSpans, err := readSpans(conn, service.ServiceName, start, start-timePeriod)
+			rows, err := readTotalRows(conn, service.ServiceName, start-timePeriod, start)
 			if err != nil {
-				zap.S().Fatal(err, "error while reading spans")
+				zap.S().Fatal(err, "error while reading total rows")
 				return
 			}
-			if len(batchSpans) > 0 {
-				processedSpans := processSpans(batchSpans)
-				err = write(conn, processedSpans)
-				if err != nil {
-					zap.S().Fatal(err, "error while writing spans")
-					return
+			if rows == 0 {
+				start -= timePeriod
+				continue
+			}
+			
+			// If rows are more than batch size, then split them into batches
+			if rows >= *batchSize {
+				// fmt.Println("Rows: ", rows)
+				offset := int64(0)
+				batchRow := rows + *batchSize
+				for batchRow >= *batchSize {
+					batchSpans, err := readSpans(conn, service.ServiceName, start, start-timePeriod, int64(*batchSize), offset)
+					if err != nil {
+						zap.S().Fatal(err, "error while reading spans")
+						return
+					}
+					// fmt.Println("Size of batch ", len(batchSpans))
+					// fmt.Println("batchRows left: ", batchRow)
+					if len(batchSpans) > 0 {
+						processedSpans := processSpans(batchSpans)
+						err = write(conn, processedSpans)
+						if err != nil {
+							zap.S().Fatal(err, "error while writing spans")
+							return
+						}
+					}
+					batchRow -= *batchSize
+					offset += int64(*batchSize)
 				}
 				zap.S().Info(fmt.Sprintf("ServiceName: %s \nMigrated till: %s \nTimeNano: %v \n_________**********************************_________", service.ServiceName, time.Unix(0, int64(start-uint64(timePeriod))), start-uint64(timePeriod)))
+				start -= timePeriod
+			} else {
+				batchSpans, err := readSpans(conn, service.ServiceName, start, start-timePeriod, -1, -1)
+				if err != nil {
+					zap.S().Fatal(err, "error while reading spans")
+					return
+				}
+				if len(batchSpans) > 0 {
+					processedSpans := processSpans(batchSpans)
+					err = write(conn, processedSpans)
+					if err != nil {
+						zap.S().Fatal(err, "error while writing spans")
+						return
+					}
+					zap.S().Info(fmt.Sprintf("ServiceName: %s \nMigrated till: %s \nTimeNano: %v \n_________**********************************_________", service.ServiceName, time.Unix(0, int64(start-uint64(timePeriod))), start-uint64(timePeriod)))
+				}
+				start -= timePeriod
 			}
-			start -= timePeriod
 		}
 	}
 	zap.S().Info(fmt.Sprintf("Completed migration in: %s", time.Since(start)))
