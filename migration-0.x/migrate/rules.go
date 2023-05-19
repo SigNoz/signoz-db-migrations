@@ -296,17 +296,19 @@ func migrateRule(rule StoredRule) (StoredRuleNew, error) {
 			}
 
 			filterSet := &v3.FilterSet{}
-			for _, filter := range q.TagFilters.Items {
-				filterSet.Items = append(filterSet.Items, v3.FilterItem{
-					Key: v3.AttributeKey{
-						Key:      filter.Key,
-						DataType: "string",
-						Type:     "tag",
-						IsColumn: false,
-					},
-					Operator: v3.FilterOperator(filter.Operator),
-					Value:    filter.Value,
-				})
+			if q.TagFilters != nil {
+				for _, filter := range q.TagFilters.Items {
+					filterSet.Items = append(filterSet.Items, v3.FilterItem{
+						Key: v3.AttributeKey{
+							Key:      filter.Key,
+							DataType: "string",
+							Type:     "tag",
+							IsColumn: false,
+						},
+						Operator: v3.FilterOperator(filter.Operator),
+						Value:    filter.Value,
+					})
+				}
 			}
 			filterSet.Operator = "AND"
 		}

@@ -498,7 +498,7 @@ func migrateDashboardData(data string) (string, bool) {
 				ddNew.Widgets[i].Query.BuilderQueries.BuilderQuery[j].GroupBy = append(ddNew.Widgets[i].Query.BuilderQueries.BuilderQuery[j].GroupBy, AttributeKey{
 					Key:      item,
 					DataType: "string",
-					Type:     "",
+					Type:     "tag",
 					IsColumn: false,
 				})
 			}
