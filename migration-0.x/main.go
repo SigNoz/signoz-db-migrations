@@ -5,12 +5,27 @@ import (
 	"fmt"
 	"log"
 	"os"
+
+	"github.com/jmoiron/sqlx"
+	"go.signoz.io/sqlite-migration-0.x/migrate"
 )
+
+var (
+	db *sqlx.DB
+)
+
+// initDB initalize database
+func initDB(dataSourceName string) error {
+	var err error
+
+	// open database connection
+	db, err = sqlx.Connect("sqlite3", dataSourceName)
+	return err
+}
 
 func main() {
 	dataSource := flag.String("dataSource", "signoz.db", "Data Source path")
 	flag.Parse()
-	fmt.Println(*dataSource)
 
 	fmt.Println("Data Source path: ", *dataSource)
 
@@ -24,6 +39,5 @@ func main() {
 		log.Fatalln(err)
 	}
 
-	// migrate dashboards
-	migrateDashboards()
+	migrate.Run(db)
 }
