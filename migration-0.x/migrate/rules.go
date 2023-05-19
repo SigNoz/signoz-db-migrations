@@ -3,6 +3,7 @@ package migrate
 import (
 	"encoding/json"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -282,7 +283,7 @@ func migrateRule(rule StoredRule) (StoredRuleNew, error) {
 				},
 				Filters:    &v3.FilterSet{Items: make([]v3.FilterItem, 0), Operator: "AND"},
 				GroupBy:    make([]v3.AttributeKey, len(q.GroupingTags)),
-				Expression: q.QueryName,
+				Expression: q.Expression,
 				Disabled:   q.Disabled,
 				ReduceTo:   v3.ReduceToOperator((stringAggrOperatorFromInt(int(q.ReduceTo)))),
 			}
@@ -305,12 +306,13 @@ func migrateRule(rule StoredRule) (StoredRuleNew, error) {
 							Type:     "tag",
 							IsColumn: false,
 						},
-						Operator: v3.FilterOperator(filter.Operator),
+						Operator: v3.FilterOperator(strings.ToLower(filter.Operator)),
 						Value:    filter.Value,
 					})
 				}
 			}
 			filterSet.Operator = "AND"
+			ruleStructNew.RuleCondition.CompositeQuery.BuilderQueries[name].Filters = filterSet
 		}
 
 		ruleStructNew.RuleCondition.CompositeQuery.PanelType = v3.PanelType(newPanelTypeFromInt(int(ruleStruct.RuleCondition.CompositeMetricQuery.PanelType)))
