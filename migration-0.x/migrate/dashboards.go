@@ -493,7 +493,7 @@ func migrateDashboardData(data string) (string, bool) {
 					Value:    item.Value,
 				})
 			}
-			ddNew.Widgets[i].Query.BuilderQueries.BuilderQuery[j].GroupBy = []AttributeKey{}
+			ddNew.Widgets[i].Query.BuilderQueries.BuilderQuery[j].GroupBy = make([]AttributeKey, 0)
 			for _, item := range q.GroupBy {
 				ddNew.Widgets[i].Query.BuilderQueries.BuilderQuery[j].GroupBy = append(ddNew.Widgets[i].Query.BuilderQueries.BuilderQuery[j].GroupBy, AttributeKey{
 					Key:      item,
@@ -502,6 +502,9 @@ func migrateDashboardData(data string) (string, bool) {
 					IsColumn: false,
 				})
 			}
+			ddNew.Widgets[i].Query.BuilderQueries.BuilderQuery[j].Having = make([]v3_Having, 0)
+			ddNew.Widgets[i].Query.BuilderQueries.BuilderQuery[j].OrderBy = make([]v3_OrderBy, 0)
+			ddNew.Widgets[i].Query.BuilderQueries.BuilderQuery[j].SelectColumns = make([]AttributeKey, 0)
 			ddNew.Widgets[i].Query.BuilderQueries.BuilderQuery[j].ReduceTo = stringAggrOperatorFromInt(q.ReduceTo)
 			ddNew.Widgets[i].Query.BuilderQueries.BuilderQuery[j].Disabled = q.Disabled
 			ddNew.Widgets[i].Query.BuilderQueries.BuilderQuery[j].Legend = q.Legend
