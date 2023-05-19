@@ -238,19 +238,19 @@ type v3_BuilderQuery struct {
 	QueryName          string         `json:"queryName"`
 	DataSource         string         `json:"dataSource"`
 	AggregateOperator  string         `json:"aggregateOperator"`
-	AggregateAttribute AttributeKey   `json:"aggregateAttribute,omitempty"`
-	StepInterval       int            `json:"stepInterval,omitempty"`
-	Filters            *v3_FilterSet  `json:"filters,omitempty"`
-	GroupBy            []AttributeKey `json:"groupBy,omitempty"`
+	AggregateAttribute AttributeKey   `json:"aggregateAttribute"`
+	StepInterval       int            `json:"stepInterval"`
+	Filters            *v3_FilterSet  `json:"filters"`
+	GroupBy            []AttributeKey `json:"groupBy"`
 	Expression         string         `json:"expression"`
 	Disabled           bool           `json:"disabled"`
-	Having             []v3_Having    `json:"having,omitempty"`
+	Having             []v3_Having    `json:"having"`
 	Legend             string         `json:"legend"`
 	Limit              uint64         `json:"limit"`
 	Offset             uint64         `json:"offset"`
 	PageSize           uint64         `json:"pageSize"`
-	OrderBy            []v3_OrderBy   `json:"orderBy,omitempty"`
-	ReduceTo           string         `json:"reduceTo,omitempty"`
+	OrderBy            []v3_OrderBy   `json:"orderBy"`
+	ReduceTo           string         `json:"reduceTo"`
 	SelectColumns      []AttributeKey `json:"selectColumns,omitempty"`
 }
 
