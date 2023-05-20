@@ -432,6 +432,7 @@ func migrateDashboardData(data string) (string, bool) {
 	ddNew.Variables = make(map[string]VariableNew)
 	for name, variable := range dd.Variables {
 		ddNew.Variables[name] = variable
+		variable.Name = name
 	}
 
 	// copy widgets
