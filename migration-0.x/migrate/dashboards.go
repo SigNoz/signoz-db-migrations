@@ -414,7 +414,7 @@ func migrateDashboardData(data string) (string, bool) {
 
 	err := json.Unmarshal([]byte(data), &dd)
 	if err != nil {
-		var tempDashboardData DashboardDataNew
+		var tempDashboardData v3_DashboardDataNew
 		newDashErr := json.Unmarshal([]byte(data), &tempDashboardData)
 		if newDashErr == nil {
 			log.Println("New dashboard data found, skipping")
