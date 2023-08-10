@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -101,8 +102,15 @@ func hasIndex(tableStatement, field string) bool {
 	return strings.Contains(tableStatement, fmt.Sprintf("INDEX %s_idx", field))
 }
 
-func hasMaterializedColumn(tableStatement, field string) bool {
-	return strings.Contains(tableStatement, fmt.Sprintf("`%s`", field))
+func hasMaterializedColumn(tableStatement, field, dataType string) bool {
+	// check the type as well
+	regex := fmt.Sprintf("`%s` (?i)(%s) MATERIALIZED", field, dataType)
+	res, err := regexp.MatchString(regex, tableStatement)
+	if err != nil {
+		zap.S().Error(fmt.Errorf("error while matching regex. Err=%v", err))
+		return false
+	}
+	return res
 }
 
 var topLevel = map[string]struct{}{
@@ -150,7 +158,7 @@ func renameMaterializedColumnsAndAddIndex(conn clickhouse.Conn, fields []LogFiel
 			// ignore for top level fields
 			continue
 		}
-		if hasMaterializedColumn(tableStatement, field.Name) {
+		if hasMaterializedColumn(tableStatement, field.Name, field.DataType) {
 			// columns name is <type>_<name>_<datatype>
 			colname := fmt.Sprintf("%s_%s_%s", strings.ToLower(field.Type), strings.ToLower(field.DataType), field.Name)
 
