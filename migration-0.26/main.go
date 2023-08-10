@@ -152,7 +152,7 @@ func renameMaterializedColumnsAndAddIndex(conn clickhouse.Conn, fields []LogFiel
 		}
 		if hasMaterializedColumn(tableStatement, field.Name) {
 			// columns name is <type>_<name>_<datatype>
-			colname := fmt.Sprintf("%s_%s_%s", strings.ToLower(field.Type), field.Name, strings.ToLower(field.DataType))
+			colname := fmt.Sprintf("%s_%s_%s", strings.ToLower(field.Type), strings.ToLower(field.DataType), field.Name)
 
 			// rename in logs table
 			zap.S().Info(fmt.Sprintf("Renaming materialized column: %s to %s", field.Name, colname))
