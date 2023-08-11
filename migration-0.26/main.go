@@ -191,7 +191,7 @@ func renameMaterializedColumnsAndAddIndex(conn clickhouse.Conn, fields []LogFiel
 				return err
 			}
 
-			query = fmt.Sprintf("ALTER TABLE signoz_logs.distributed_logs ON CLUSTER cluster ADD COLUMN IF NOT EXISTS %s_exists bool",
+			query = fmt.Sprintf("ALTER TABLE signoz_logs.distributed_logs ON CLUSTER cluster ADD COLUMN IF NOT EXISTS %s_exists bool MATERIALIZED false",
 				colname,
 			)
 			err = conn.Exec(ctx, query)
