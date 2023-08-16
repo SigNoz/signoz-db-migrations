@@ -180,7 +180,7 @@ func renameMaterializedColumnsAndAddIndex(conn clickhouse.Conn, fields []LogFiel
 
 			// create exists column
 			keyColName := fmt.Sprintf("%s_%s_key", field.Type+"s", strings.ToLower(field.DataType))
-			query = fmt.Sprintf("ALTER TABLE signoz_logs.logs ON CLUSTER cluster ADD COLUMN IF NOT EXISTS %s_exists bool MATERIALIZED if(indexOf(%s, '%s') != 0, true, false) CODEC(LZ4)",
+			query = fmt.Sprintf("ALTER TABLE signoz_logs.logs ON CLUSTER cluster ADD COLUMN IF NOT EXISTS %s_exists bool MATERIALIZED if(indexOf(%s, '%s') != 0, true, false) CODEC(ZSTD(1))",
 				colname,
 				keyColName,
 				field.Name,
