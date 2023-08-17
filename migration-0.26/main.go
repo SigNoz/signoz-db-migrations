@@ -102,9 +102,9 @@ func hasIndex(tableStatement, field string) bool {
 	return strings.Contains(tableStatement, fmt.Sprintf("INDEX %s_idx", field))
 }
 
-func hasMaterializedColumn(tableStatement, field, dataType string) bool {
+func hasMaterializedColumn(tableStatement, field, dataType, fieldType string) bool {
 	// check the type as well
-	regex := fmt.Sprintf("`%s` (?i)(%s) MATERIALIZED", field, dataType)
+	regex := fmt.Sprintf("`%s` (?i)(%s) MATERIALIZED %s", field, dataType, fieldType)
 	res, err := regexp.MatchString(regex, tableStatement)
 	if err != nil {
 		zap.S().Error(fmt.Errorf("error while matching regex. Err=%v", err))
@@ -158,7 +158,7 @@ func renameMaterializedColumnsAndAddIndex(conn clickhouse.Conn, fields []LogFiel
 			// ignore for top level fields
 			continue
 		}
-		if hasMaterializedColumn(tableStatement, field.Name, field.DataType) {
+		if hasMaterializedColumn(tableStatement, field.Name, field.DataType, field.Type) {
 			// columns name is <type>_<name>_<datatype>
 			colname := fmt.Sprintf("%s_%s_%s", strings.ToLower(field.Type), strings.ToLower(field.DataType), field.Name)
 
