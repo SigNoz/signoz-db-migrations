@@ -7,7 +7,7 @@ RUN apk --update add \
 
 ARG TARGETPLATFORM
 
-ENV CGO_ENABLED=1
+ENV CGO_ENABLED=0
 ENV GOPATH=/go
 
 RUN export GOOS=$(echo ${TARGETPLATFORM} | cut -d / -f1) && \
