@@ -1,4 +1,9 @@
-FROM golang:1.17-buster AS builder
+FROM golang:1.18-alpine AS builder
+
+RUN apk --update add \
+    util-linux-dev \
+    build-base \
+    musl-dev
 
 ARG TARGETPLATFORM
 
@@ -18,7 +23,7 @@ RUN go mod download -x
 
 # Add the sources and proceed with build
 ADD . .
-RUN go build -o ./bin/migrate
+RUN go build -o ./bin/migrate -a -ldflags "-linkmode external -extldflags '-static' -s -w"
 RUN chmod +x ./bin/migrate
 
 
