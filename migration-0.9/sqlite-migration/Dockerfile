@@ -28,7 +28,7 @@ RUN chmod +x ./bin/migrate
 
 
 # use a minimal alpine image
-FROM alpine:3.7
+FROM alpine:3.16.7
 
 # Add Maintainer Info
 LABEL maintainer="signoz"
