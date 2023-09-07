@@ -171,7 +171,7 @@ func renameMaterializedColumnsAndAddIndex(conn clickhouse.Conn, fields []LogFiel
 			}
 
 			// rename in distributed logs table
-			query = fmt.Sprintf("ALTER TABLE signoz_logs.distributed_logs RENAME COLUMN IF EXISTS %s TO %s", field.Name, colname)
+			query = fmt.Sprintf("ALTER TABLE signoz_logs.distributed_logs on cluster cluster RENAME COLUMN IF EXISTS %s TO %s", field.Name, colname)
 			err = conn.Exec(context.Background(), query)
 			if err != nil {
 				zap.S().Error(fmt.Errorf("error while renaming materialized column on distributed logs table. Err=%v", err))
