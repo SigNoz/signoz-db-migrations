@@ -131,6 +131,16 @@ func GetTableStatement(conn clickhouse.Conn) (string, error) {
 	return statements[0].Statement, nil
 }
 
+func TruncateTagAttributes(conn clickhouse.Conn) error {
+	query := "truncate table signoz_logs.tag_attributes on cluster cluster;"
+	err := conn.Exec(context.Background(), query)
+	if err != nil {
+		zap.S().Error(fmt.Errorf("error truncating tag attributes table,  Err=%v", err))
+		return err
+	}
+	return nil
+}
+
 func hasMaterializedColumn(tableStatement, field, dataType string) bool {
 	// check the type as well
 	// fmt.Println(tableStatement, field, dataType)
@@ -242,6 +252,14 @@ func main() {
 	err = addMaterializedColumnsAndAddIndex(conn, fields)
 	if err != nil {
 		zap.S().Fatal("Error while renaming materialized columns", zap.Error(err))
+		os.Exit(1)
+
+	}
+
+	// truncate tag attributes
+	err = TruncateTagAttributes(conn)
+	if err != nil {
+		zap.S().Fatal("Error truncating tag attributes", zap.Error(err))
 		os.Exit(1)
 
 	}
