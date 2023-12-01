@@ -235,7 +235,7 @@ func main() {
 	userNameFlag := flag.String("userName", "default", "clickhouse username")
 	passwordFlag := flag.String("password", "", "clickhouse password")
 	flag.Parse()
-	zap.S().Debug(fmt.Sprintf("Params: %s %s %s %s", *hostFlag, *portFlag, *userNameFlag, *passwordFlag))
+	zap.S().Debug(fmt.Sprintf("Params: %s %s %s", *hostFlag, *portFlag, *userNameFlag))
 
 	conn, err := connect(*hostFlag, *portFlag, *userNameFlag, *passwordFlag)
 	if err != nil {
