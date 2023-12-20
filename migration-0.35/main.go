@@ -192,6 +192,11 @@ func addMaterializedColumnsAndAddIndex(conn clickhouse.Conn, fields []LogField) 
 			}
 		}
 
+		// index not required for bool attributes as the cardinality is only two
+		if strings.ToLower(field.DataType) == "bool" {
+			continue
+		}
+
 		zap.S().Info(fmt.Sprintf("Create index: %s_idx", colname))
 		query := fmt.Sprintf("ALTER TABLE signoz_logs.logs on cluster cluster ADD INDEX IF NOT EXISTS %s_idx (%s) TYPE bloom_filter(0.01) GRANULARITY 64", colname, colname)
 		err := conn.Exec(context.Background(), query)
