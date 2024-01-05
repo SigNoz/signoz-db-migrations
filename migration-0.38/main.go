@@ -175,13 +175,22 @@ func removeUnderscoreMaterializedColumnsIndex(conn clickhouse.Conn, fields []Log
 		// columns name is <type>_<name>_<datatype>
 		colname := fmt.Sprintf("%s_%s_%s", strings.ToLower(field.Type), strings.ToLower(field.DataType), strings.ReplaceAll(field.Name, ".", "_"))
 
+		// delete the index
+		zap.S().Info(fmt.Sprintf("Deleting index: %s_idx", colname))
+		query := fmt.Sprintf("ALTER TABLE signoz_logs.logs on cluster cluster DROP INDEX IF EXISTS %s_idx", colname)
+		err := conn.Exec(context.Background(), query)
+		if err != nil {
+			zap.S().Error(fmt.Errorf("error while deleting index. Err=%v", err))
+			return err
+		}
+
+		zap.S().Info(fmt.Sprintf("deleting materialized for: %s i.e %s and %s_exists", field.Name, colname, colname))
 		for _, table := range []string{"logs", "distributed_logs"} {
 			// drop column
-			zap.S().Info(fmt.Sprintf("creating materialized for: %s i.e %s", field.Name, colname))
 			query := fmt.Sprintf("ALTER TABLE signoz_logs.%s on cluster cluster DROP COLUMN IF EXISTS %s", table, colname)
 			err := conn.Exec(context.Background(), query)
 			if err != nil {
-				zap.S().Error(fmt.Errorf("error while creating materialized column on logs table. Err=%v", err))
+				zap.S().Error(fmt.Errorf("error while deleting materialized column on logs table. Err=%v", err))
 			}
 
 			// drop exists column
@@ -191,18 +200,9 @@ func removeUnderscoreMaterializedColumnsIndex(conn clickhouse.Conn, fields []Log
 			)
 			err = conn.Exec(ctx, query)
 			if err != nil {
-				zap.S().Error(fmt.Errorf("error while creating exists column on logs table. Err=%v", err))
+				zap.S().Error(fmt.Errorf("error while deleting exists column on logs table. Err=%v", err))
 				return err
 			}
-		}
-
-		// delete the index
-		zap.S().Info(fmt.Sprintf("Create index: %s_idx", colname))
-		query := fmt.Sprintf("ALTER TABLE signoz_logs.logs on cluster cluster DROP INDEX IF EXISTS %s_idx", colname)
-		err := conn.Exec(context.Background(), query)
-		if err != nil {
-			zap.S().Error(fmt.Errorf("error while renaming index. Err=%v", err))
-			return err
 		}
 
 	}
