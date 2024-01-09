@@ -7,7 +7,7 @@ class TestUpdateDashboard(unittest.TestCase):
         "attributes_float64_extra_info_latency": ['extra_info.latency', 'float64', 'attributes'],
         "attributes_string_service_name": ['service.name', 'string', 'attributes'],
         "attributes_string_extra_info_url_route": ['extra_info.url_route', 'string', 'attributes'],
-        "attributes_string_request_context_test_name": ['request_context.test_name', 'string', 'attributes']
+        "attributes_string_request_context_test_name": ['request_context.test_name', 'String', 'attributes']
     }
     def test_update_dashboard_builder_query(self):
         old_dashboard = {
@@ -204,7 +204,7 @@ class TestUpdateDashboard(unittest.TestCase):
             ]
         }
 
-        resp = update_dashboard(json.dumps(old_dashboard), self.fields)
+        resp = update_dashboard(old_dashboard, self.fields)
         equal = sorted(resp.items()) == sorted(expected_updated_dashboard.items())
         self.assertTrue(equal==True)
     
@@ -276,7 +276,7 @@ class TestUpdateDashboard(unittest.TestCase):
                 }
             ]
         }
-        resp = update_dashboard(json.dumps(old_dashboard), self.fields)
+        resp = update_dashboard(old_dashboard, self.fields)
         equal = sorted(resp.items()) == sorted(expected_updated_dashboard.items())
         self.assertTrue(equal==True)
         

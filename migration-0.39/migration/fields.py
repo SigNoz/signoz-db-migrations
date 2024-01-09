@@ -32,7 +32,7 @@ def getFields(client):
 
     fields = {}
     for field in attributes + resources:  
-        fields[field[2]+"_"+field[1].lower()+"_" + field[0]+"_"] = field
+        fields[field[2]+"_"+field[1].lower()+"_" + field[0].replace('.', '_')] = field
     return fields
 
 def get_type(type):

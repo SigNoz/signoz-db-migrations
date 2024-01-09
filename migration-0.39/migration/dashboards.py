@@ -5,16 +5,7 @@ import sys
 import json
 from migration.fields import update_field
 
-def update_dashboard(json_data, fields):
-    try:
-        data = json.loads(json_data)
-    except json.JSONDecodeError:
-        print("Invalid JSON format.")
-        return
-    if 'widgets' not in data:
-        print("Invalid JSON structure. Missing 'data' or 'widgets' key.")
-        return
-
+def update_dashboard(data, fields):
     for index in range(len(data['widgets'])):
         widget = data['widgets'][index]
         if 'query' not in widget or 'builder' not in widget['query']:
@@ -27,7 +18,7 @@ def update_dashboard(json_data, fields):
                 sql = widget["query"]["clickhouse_sql"][i]
 
                 if "query" not in sql.keys():
-                    print("query not found for Dashboard : {} , panel: {}, type: {}".format(data['title'], widget['title'], query_type))
+                    # print("query not found for Dashboard : {} , panel: {}, type: {}".format(data['title'], widget['title'], query_type))
                     continue
                 
                 if "signoz_logs.distributed_logs"  not in sql["query"]:
@@ -45,9 +36,9 @@ def update_dashboard(json_data, fields):
 
                     
                     # check if materialized column is there if yes then replace it
-                    materialized_name = updated_attribute[2][:-1] + "_" + updated_attribute[1][:-1].lower() + "_" + updated_attribute[0].replace('.', '_')
+                    materialized_name = updated_attribute[2][:-1] + "_" + updated_attribute[1].lower() + "_" + updated_attribute[0].replace('.', '_')
                     if materialized_name in sql["query"]:
-                        updated_materialized_name =  updated_attribute[2][:-1] + "_" + updated_attribute[1][:-1].lower() + "_" + updated_attribute[0].replace('.', '$$')
+                        updated_materialized_name =  updated_attribute[2][:-1] + "_" + updated_attribute[1].lower() + "_" + updated_attribute[0].replace('.', '$$')
                         sql["query"] = sql["query"].replace(materialized_name, updated_materialized_name)          
         elif query_type == "builder":
             groupByNames = {}
@@ -94,11 +85,30 @@ def update_dashboard(json_data, fields):
                 widget['query']['builder']['queryFormulas'][i] = query_formula
         data['widgets'][index] = widget
     return data
-                
 
-def updateDashboards(cursor, fields):
+def update_db(conn, id, dashboard):
+    cursor = conn.cursor()
+    q = """UPDATE dashboards SET data = ? WHERE id = ?"""
+    data = json.dumps(dashboard).encode('utf-8')
+    x= cursor.execute(q, (data, id))
+    conn.commit()
+    cursor.close()
+
+
+def updateDashboards(conn, fields):
     # The result of a "cursor.execute" can be iterated over by row
+    cursor = conn.cursor()
     for row in cursor.execute('SELECT id, uuid, data FROM dashboards'):
         json_str = row[2].decode('utf-8')
-        update_dashboard(json_str, fields)
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError:
+            print("Invalid JSON format.")
+            return
+        if 'widgets' not in data:
+            print("Invalid JSON structure. Missing 'data' or 'widgets' key.")
+            return
+        dashboard = update_dashboard(data, fields)
+        update_db(conn, row[0], dashboard)
     # Be sure to close the connection
+    cursor.close()

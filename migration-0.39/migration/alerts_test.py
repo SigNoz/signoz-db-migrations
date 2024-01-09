@@ -6,7 +6,8 @@ class TestUpdateDashboard(unittest.TestCase):
     fields = {
         "attributes_string_service_name": ['service.name', 'string', 'attributes'],
         "resources_string_container_name": ['container.name', 'string', 'resources'],
-        "attributes_float64_extra_info_request_timings_sys_schedule_thread":['extra_info.request_timings.sys.schedule_thread', 'float64', 'attributes']
+        "attributes_float64_extra_info_request_timings_sys_schedule_thread":['extra_info.request_timings.sys.schedule_thread', 'float64', 'attributes'],
+        "resources_string_service_name": ['service.name', 'String', 'resources']
     }
     def test_update_dashboard_builder_query(self):
         old_alert = {
@@ -243,7 +244,7 @@ class TestUpdateDashboard(unittest.TestCase):
             "updateBy": "prashant@signoz.io"
         }
 
-        resp = update_alert(json.dumps(old_alert), self.fields)
+        resp = update_alert(old_alert, self.fields)
         equal = sorted(resp.items()) == sorted(expected_updated_alert.items())
         self.assertTrue(equal==True)
     
@@ -379,9 +380,147 @@ class TestUpdateDashboard(unittest.TestCase):
             ],
         }
         
-        resp = update_alert(json.dumps(old_alert), self.fields)
-        print(json.dumps(resp))
-        print(json.dumps(expected_updated_alert))
+        resp = update_alert(old_alert, self.fields)
+        # print(json.dumps(resp))
+        # print(json.dumps(expected_updated_alert))
+        equal = sorted(resp.items()) == sorted(expected_updated_alert.items())
+        self.assertTrue(equal==True)
+        
+    def test_update_alert_SQL_query_materialized(self):
+        old_alert = {
+            "id": "7",
+            "state": "firing",
+            "alert": "Test Alert",
+            "alertType": "METRIC_BASED_ALERT",
+            "ruleType": "threshold_rule",
+            "evalWindow": "5m0s",
+            "condition": {
+                "compositeQuery": {
+                    "builderQueries": {
+                        "A": {
+                            "queryName": "A",
+                            "stepInterval": 60,
+                            "dataSource": "metrics",
+                            "aggregateOperator": "count",
+                            "aggregateAttribute": {
+                                "key": "",
+                                "dataType": "",
+                                "type": "",
+                                "isColumn": False,
+                                "isJSON": False
+                            },
+                            "filters": {
+                                "op": "AND",
+                                "items": []
+                            },
+                            "expression": "A",
+                            "disabled": False,
+                            "limit": 0,
+                            "offset": 0,
+                            "pageSize": 0,
+                            "reduceTo": "sum"
+                        }
+                    },
+                    "chQueries": {
+                        "A": {
+                            "query": "select resource_string_service_name as service, count() as count_per_min from signoz_logs.distributed_logs where timestamp>toUnixTimestamp64Nano(now64() - INTERVAL 1 MINUTE) group by resource_string_service_name order by count_per_min desc limit 20;",
+                            "disabled": False
+                        }
+                    },
+                    "promQueries": {
+                        "A": {
+                            "query": "",
+                            "disabled": False
+                        }
+                    },
+                    "panelType": "graph",
+                    "queryType": "clickhouse_sql"
+                },
+                "op": "1",
+                "target": 1,
+                "matchType": "1"
+            },
+            "labels": {
+            },
+            "annotations": {
+                "description": "This alert is fired when the defined metric (current value: {{$value}}) crosses the threshold ({{$threshold}})",
+                "summary": "The rule threshold is set to {{$threshold}}, and the observed metric value is {{$value}}"
+            },
+            "disabled": False,
+            "source": "",
+            "preferredChannels": [
+            ],
+        }
+        
+
+        expected_updated_alert = {
+            "id": "7",
+            "state": "firing",
+            "alert": "Test Alert",
+            "alertType": "METRIC_BASED_ALERT",
+            "ruleType": "threshold_rule",
+            "evalWindow": "5m0s",
+            "condition": {
+                "compositeQuery": {
+                    "builderQueries": {
+                        "A": {
+                            "queryName": "A",
+                            "stepInterval": 60,
+                            "dataSource": "metrics",
+                            "aggregateOperator": "count",
+                            "aggregateAttribute": {
+                                "key": "",
+                                "dataType": "",
+                                "type": "",
+                                "isColumn": False,
+                                "isJSON": False
+                            },
+                            "filters": {
+                                "op": "AND",
+                                "items": []
+                            },
+                            "expression": "A",
+                            "disabled": False,
+                            "limit": 0,
+                            "offset": 0,
+                            "pageSize": 0,
+                            "reduceTo": "sum"
+                        }
+                    },
+                    "chQueries": {
+                        "A": {
+                            "query": "select resource_string_service$$name as service, count() as count_per_min from signoz_logs.distributed_logs where timestamp>toUnixTimestamp64Nano(now64() - INTERVAL 1 MINUTE) group by resource_string_service$$name order by count_per_min desc limit 20;",
+                            "disabled": False
+                        }
+                    },
+                    "promQueries": {
+                        "A": {
+                            "query": "",
+                            "disabled": False
+                        }
+                    },
+                    "panelType": "graph",
+                    "queryType": "clickhouse_sql"
+                },
+                "op": "1",
+                "target": 1,
+                "matchType": "1"
+            },
+            "labels": {
+            },
+            "annotations": {
+                "description": "This alert is fired when the defined metric (current value: {{$value}}) crosses the threshold ({{$threshold}})",
+                "summary": "The rule threshold is set to {{$threshold}}, and the observed metric value is {{$value}}"
+            },
+            "disabled": False,
+            "source": "",
+            "preferredChannels": [
+            ],
+        }
+        
+        resp = update_alert(old_alert, self.fields)
+        # print(json.dumps(resp))
+        # print(json.dumps(expected_updated_alert))
         equal = sorted(resp.items()) == sorted(expected_updated_alert.items())
         self.assertTrue(equal==True)
         
