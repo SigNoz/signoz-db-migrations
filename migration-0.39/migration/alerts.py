@@ -45,49 +45,47 @@ def update_alert(json_data, fields):
     elif query_type == "builder":
         groupByNames = {}
         for name, builderQuery in data['condition']['compositeQuery']['builderQueries'].items():
-            
             data_source = builderQuery.get('dataSource', 'No DataSource found')
-            if data_source != "logs":
-                continue
+
+            ## dont allow alerts which 
+            if data_source != "logs" and name == builderQuery["expression"]:
+                break
             print("Alert : {} , type: {}".format(data['alert'], query_type))
 
-            # update aggregate attribute
-            builderQuery["aggregateAttribute"], updated = update_field(builderQuery["aggregateAttribute"], fields)
-            
-            # update filters
-            for j in range(0, len(builderQuery["filters"]["items"])):
-                builderQuery["filters"]["items"][j]["key"], updated = update_field(builderQuery["filters"]["items"][j]["key"], fields)
 
-            # update group by 
-            # for j in range(0, len(builderQuery["groupBy"])):
-            #     oldKey = builderQuery["groupBy"][j]["key"]
-            #     builderQuery["groupBy"][j], updated = update_field(builderQuery["groupBy"][j],fields)
-            #     if updated:
-            #         groupByNames[oldKey] = builderQuery["groupBy"][j]["key"]
-            
-            # # update order by
-            # if "order"
-            # for j in range(0, len(builderQuery["orderBy"])):
-            #     if builderQuery["orderBy"][j]["columnName"] in groupByNames.keys():
-            #         builderQuery["orderBy"][j]["columnName"] = groupByNames[builderQuery["orderBy"][j]["columnName"]]
+            if name == builderQuery["expression"]:
+                # only for formulas
+                # update aggregate attribute
+                builderQuery["aggregateAttribute"], updated = update_field(builderQuery["aggregateAttribute"], fields)
+                
+                # update filters
+                for j in range(0, len(builderQuery["filters"]["items"])):
+                    builderQuery["filters"]["items"][j]["key"], updated = update_field(builderQuery["filters"]["items"][j]["key"], fields)
 
+                # update group by 
+                if "groupBy" in builderQuery.keys():
+                    for j in range(0, len(builderQuery["groupBy"])):
+                        oldKey = builderQuery["groupBy"][j]["key"]
+                        builderQuery["groupBy"][j], updated = update_field(builderQuery["groupBy"][j],fields)
+                        if updated:
+                            groupByNames[oldKey] = builderQuery["groupBy"][j]["key"]
+                
+                # update order by
+                if "orderBy" in builderQuery.keys():
+                    for j in range(0, len(builderQuery["orderBy"])):
+                        if builderQuery["orderBy"][j]["columnName"] in groupByNames.keys():
+                            builderQuery["orderBy"][j]["columnName"] = groupByNames[builderQuery["orderBy"][j]["columnName"]]
+
+            # for both formulas and queries
             # update the legends
-            # for key, value in groupByNames.items():
-            #     if r"{{" + key + r"}}" in builderQuery["legend"]:
-            #         builderQuery["legend"] = builderQuery["legend"].replace(r"{{" + key + r"}}", r"{{" + value + r"}}")
+            if "legend" in builderQuery.keys():
+                for key, value in groupByNames.items():
+                    if r"{{" + key + r"}}" in builderQuery["legend"]:
+                        builderQuery["legend"] = builderQuery["legend"].replace(r"{{" + key + r"}}", r"{{" + value + r"}}")
 
             # update the data
             data['condition']['compositeQuery']['builderQueries'][name] = builderQuery
 
-        # for i  in range(len(widget['query']['builder']['queryFormulas'])):
-        #     query_formula = widget['query']['builder']['queryFormulas'][i]
-        #     for key, value in groupByNames.items():
-        #         if r"{{" + key + r"}}" in query_formula["legend"]:
-        #             builderQuery["legend"] = query_formula["legend"].replace(r"{{" + key + r"}}", r"{{" + value + r"}}")
-            
-        #     # update the data
-        #     widget['query']['builder']['queryFormulas'][i] = query_formula
-    # data['widgets'][index] = widget
     return data
                 
 
