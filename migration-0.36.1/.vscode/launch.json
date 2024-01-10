@@ -10,6 +10,13 @@
             "request": "launch",
             "module": "migration.alerts_test",
             "justMyCode": true
+        },
+        {
+            "name": "Python: Dashboard tests",
+            "type": "python",
+            "request": "launch",
+            "module": "migration.dashboards_test",
+            "justMyCode": true
         }
     ]
 }

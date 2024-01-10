@@ -16,14 +16,14 @@ def update_dashboard(data, fields):
         if query_type == "clickhouse_sql":
             for i in range(len(widget["query"]["clickhouse_sql"])):
                 sql = widget["query"]["clickhouse_sql"][i]
-
+                
                 if "query" not in sql.keys():
                     # print("query not found for Dashboard : {} , panel: {}, type: {}".format(data['title'], widget['title'], query_type))
                     continue
                 
                 if "signoz_logs.distributed_logs"  not in sql["query"]:
                     continue
-                
+
                 print("Dashboard : {} , panel: {}, type: {}".format(data['title'], widget['title'], query_type))
                 for old_name, updated_attribute in fields.items():
                     # check if attribute is there
@@ -39,7 +39,7 @@ def update_dashboard(data, fields):
                     materialized_name = updated_attribute[2][:-1] + "_" + updated_attribute[1].lower() + "_" + updated_attribute[0].replace('.', '_')
                     if materialized_name in sql["query"]:
                         updated_materialized_name =  updated_attribute[2][:-1] + "_" + updated_attribute[1].lower() + "_" + updated_attribute[0].replace('.', '$$')
-                        sql["query"] = sql["query"].replace(materialized_name, updated_materialized_name)          
+                        sql["query"] = sql["query"].replace(materialized_name, updated_materialized_name) 
         elif query_type == "builder":
             groupByNames = {}
             for i  in range(len(widget['query']['builder']['queryData'])):
