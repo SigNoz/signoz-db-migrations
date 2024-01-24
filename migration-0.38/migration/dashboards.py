@@ -90,8 +90,7 @@ def update_db(conn, id, dashboard):
     cursor = conn.cursor()
     q = """UPDATE dashboards SET data = ? WHERE id = ?"""
     data = json.dumps(dashboard).encode('utf-8')
-    x= cursor.execute(q, (data, id))
-    conn.commit()
+    cursor.execute(q, (data, id))
     cursor.close()
 
 

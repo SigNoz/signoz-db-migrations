@@ -88,7 +88,6 @@ def update_db(conn, id, alert):
     cursor = conn.cursor()
     q = """UPDATE rules SET data = ? WHERE id = ?"""
     cursor.execute(q, (str(json.dumps(alert)), int(id)))
-    conn.commit()
     cursor.close()
 
 
