@@ -15,15 +15,19 @@ parser.add_argument("--data_source","--data_source",default ="db", help = "Data 
 args = parser.parse_args()
 
 if __name__ == "__main__":
-    print(args)
     client = Client(host=args.host, port=args.port, user=args.user, password=args.password)
     fields = getFields(client)
     if len(fields) == 0:
         print("Nothing to migrate....")
         exit(0)
+    print("fields from clickhouse -------------------------------------")
     print(fields)
+    print("------------------------------------------------------------\n\n")
     con = sqlite3.connect(args.data_source)
+    print("updating dashboards ----------------------------------------")
     updateDashboards(con,fields)
+    print("\n\nupdating alerts ----------------------------------------")
     updateAlerts(con,fields)
+    print("\n\ncommiting changes --------------------------------------")
     con.commit()
     con.close()

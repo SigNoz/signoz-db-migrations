@@ -11,4 +11,4 @@ RUN pip3 install -r requirements.txt
 COPY . .
 
 # run the binary
-ENTRYPOINT [ "python3", "main.py"]
+ENTRYPOINT [ "python3", "-u", "main.py"]
