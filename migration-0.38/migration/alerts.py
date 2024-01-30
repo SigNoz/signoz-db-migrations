@@ -17,6 +17,7 @@ def update_alert(data, fields):
         if "query" not in clickhouse_sql.keys():
             print("Query not found : {} , type: {}".format(data['alert'], query_type))
             print(clickhouse_sql)
+            return data
         clickhouse_sql =clickhouse_sql["query"]
         
         if "signoz_logs.distributed_logs"  in clickhouse_sql:
