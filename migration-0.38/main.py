@@ -8,7 +8,7 @@ import sqlite3
 parser = argparse.ArgumentParser()
 
 parser.add_argument("-host", "--host", default="127.0.0.1", help="Clickhouse host")
-parser.add_argument("-port", "--port", default="9000", help="Clickhouse port", type=int)
+parser.add_argument("-port", "--port", default="9000", help="Clickhouse port")
 parser.add_argument("-user", "--user", default="default", help="Clickhouse username")
 parser.add_argument("-password", "--password", default="", help="Clickhouse Password")
 parser.add_argument("--data_source","--data_source",default ="db", help = "Data Source path of sqlite db")
