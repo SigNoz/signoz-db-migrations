@@ -45,7 +45,7 @@ def update_alert(data, fields):
 
             ## dont allow alerts which 
             if data_source != "logs" and name == builderQuery["expression"]:
-                break
+                continue
             print("Alert : {} , type: {}".format(data['alert'], query_type))
 
 
