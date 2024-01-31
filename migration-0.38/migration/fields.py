@@ -45,7 +45,6 @@ def update_field(field, lookup):
     if field["type"] == None or field["dataType"] == None or field["key"] == None:
         return field, updated
     name = get_type(field["type"])+ "_"+ field["dataType"].lower()+"_" + field["key"]
-    updated = False
     if name in lookup.keys():
         field["key"] = lookup[name][0]
         updated = True
