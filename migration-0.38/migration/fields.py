@@ -41,6 +41,9 @@ def get_type(type):
     return "resources"
 
 def update_field(field, lookup):
+    updated = False
+    if field["type"] == None or field["dataType"] == None or field["key"] == None:
+        return field, updated
     name = get_type(field["type"])+ "_"+ field["dataType"].lower()+"_" + field["key"]
     updated = False
     if name in lookup.keys():
