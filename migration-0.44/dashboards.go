@@ -16,92 +16,22 @@ var (
 type Dashboard struct {
 	Id        int       `json:"id" db:"id"`
 	Uuid      string    `json:"uuid" db:"uuid"`
-	Slug      string    `json:"-" db:"-"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 	CreateBy  *string   `json:"created_by" db:"created_by"`
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 	UpdateBy  *string   `json:"updated_by" db:"updated_by"`
-	Title     string    `json:"-" db:"-"`
-	Data      string      `json:"data" db:"data"`
+	Data      string    `json:"data" db:"data"`
 	Locked    *int      `json:"isLocked" db:"locked"`
 }
-
-type Data map[string]interface{}
-
-type Widget struct {
-	Description    string             `json:"description"`
-	ID             string             `json:"id"`
-	IsStacked      bool               `json:"isStacked"`
-	NullZeroValues string             `json:"nullZeroValues"`
-	Opacity        string             `json:"opacity"`
-	PanelTypes     string             `json:"panelTypes"`
-	Query          Query              `json:"query"`
-	QueryData      QueryDataDashboard `json:"queryData"`
-	TimePreferance string             `json:"timePreferance"`
-	Title          string             `json:"title"`
-	YAxisUnit      string             `json:"yAxisUnit"`
-	QueryType      int                `json:"queryType"`
-}
-
-type QueryDataDashboard struct {
-	Data         Data   `json:"data"`
-	Error        bool   `json:"error"`
-	ErrorMessage string `json:"errorMessage"`
-	Loading      bool   `json:"loading"`
-}
-
-type Query struct {
-	ClickHouse     []ClickHouseQueryDashboard `json:"clickHouse"`
-	PromQL         []PromQueryDashboard       `json:"promQL"`
-	MetricsBuilder MetricsBuilder             `json:"metricsBuilder"`
-	QueryType      int                        `json:"queryType"`
-}
-
-type MetricsBuilder struct {
-	Formulas     []string       `json:"formulas"`
-	QueryBuilder []QueryBuilder `json:"queryBuilder"`
-}
-
-type QueryBuilder struct {
-	AggregateOperator interface{} `json:"aggregateOperator"`
-	Disabled          bool        `json:"disabled"`
-	GroupBy           []string    `json:"groupBy"`
-	Legend            string      `json:"legend"`
-	MetricName        string      `json:"metricName"`
-	Name              string      `json:"name"`
-	TagFilters        TagFilters  `json:"tagFilters"`
-	ReduceTo          interface{} `json:"reduceTo"`
-}
-
-type TagFilters struct {
-	StringTagKeys []string `json:"stringTagKeys" ch:"stringTagKeys"`
-	NumberTagKeys []string `json:"numberTagKeys" ch:"numberTagKeys"`
-	BoolTagKeys   []string `json:"boolTagKeys" ch:"boolTagKeys"`
-}
-
-type PromQueryDashboard struct {
-	Query    string `json:"query"`
-	Disabled bool   `json:"disabled"`
-	Name     string `json:"name"`
-	Legend   string `json:"legend"`
-}
-
-type ClickHouseQueryDashboard struct {
-	Legend   string `json:"legend"`
-	Name     string `json:"name"`
-	Query    string `json:"rawQuery"`
-	Disabled bool   `json:"disabled"`
-}
-
-
 type DashboardData struct {
-	Description string              `json:"description"`
-	Tags        []string            `json:"tags"`
-	Name        string    			`json:"name"`
-	Layout      []Layout            `json:"layout"`
-	Title       string              `json:"title"`
-	Widgets     []Widget            `json:"widgets"`
-	Variables   map[string]Variable `json:"variables"`
+	Description string              	`json:"description"`
+	Tags        []string            	`json:"tags"`
+	Name        string    				`json:"name"`
+	Layout      []Layout            	`json:"layout"`
+	Title       string              	`json:"title"`
+	Widgets     []map[string]interface{}`json:"widgets"`
+	Variables   map[string]interface{}  `json:"variables"`
+	Version     string 				    `json:"version"`
 }
 
 type Layout struct {
@@ -113,21 +43,6 @@ type Layout struct {
 	X      int    `json:"x"`
 	Y      int    `json:"y"`
 }
-
-type Variable struct {
-	AllSelected      bool   `json:"allSelected"`
-	CustomValue      string `json:"customValue"`
-	Description      string `json:"description"`
-	ModificationUUID string `json:"modificationUUID"`
-	MultiSelect      bool   `json:"multiSelect"`
-	QueryValue       string `json:"queryValue"`
-	SelectedValue    string `json:"selectedValue"`
-	ShowALLOption    bool   `json:"showALLOption"`
-	Sort             string `json:"sort"`
-	TextboxValue     string `json:"textboxValue"`
-	Type             string `json:"type"`
-}
-
 
 
 // initDB initalize database
@@ -153,6 +68,7 @@ func migrateDData(data string) (string, bool) {
 	ddNew.Name = dd.Name
 	ddNew.Widgets = dd.Widgets
 	ddNew.Variables = dd.Variables
+	ddNew.Version = dd.Version
 	ddNew.Layout = make([]Layout, len(dd.Layout))
 
 	for i := range dd.Layout {
