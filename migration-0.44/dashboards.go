@@ -145,14 +145,7 @@ func migrateDData(data string) (string, bool) {
 
 	err := json.Unmarshal([]byte(data), &dd)
 	if err != nil {
-		var tempDashboardData DashboardData
-		newDashErr := json.Unmarshal([]byte(data), &tempDashboardData)
-		if newDashErr == nil {
-			log.Println("New dashboard data found, skipping")
-			return "", false
-		} else {
-			log.Fatalln(err)
-		}
+		log.Fatalln(err)
 	}
 	ddNew.Title = dd.Title
 	ddNew.Description = dd.Description
@@ -166,7 +159,7 @@ func migrateDData(data string) (string, bool) {
 		ddNew.Layout[i] = dd.Layout[i]
 		ddNew.Layout[i].H = 2 * ddNew.Layout[i].H
 	}
-	
+
 	newData, err := json.Marshal(ddNew)
 	if err != nil {
 		log.Fatalln(err)
