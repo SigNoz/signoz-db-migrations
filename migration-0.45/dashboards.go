@@ -24,14 +24,14 @@ type Dashboard struct {
 	Locked    *int      `json:"isLocked" db:"locked"`
 }
 type DashboardData struct {
-	Description string              		`json:"description"`
-	Tags        []string            		`json:"tags"`
-	Name        string    					`json:"name"`
-	Layout      []Layout            		`json:"layout"`
-	Title       string              		`json:"title"`
+	Description string						`json:"description"`
+	Tags        []string					`json:"tags"`
+	Name        string						`json:"name"`
+	Layout      []Layout					`json:"layout"`
+	Title       string						`json:"title"`
 	Widgets     []map[string]interface{}	`json:"widgets"`
-	Variables   map[string]interface{}  	`json:"variables"`
-	Version     string 				    	`json:"version"`
+	Variables   map[string]interface{}		`json:"variables"`
+	Version     string						`json:"version"`
 }
 
 type Layout struct {
