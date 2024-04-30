@@ -59,9 +59,11 @@ func migrateDData(data string) (string,bool) {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	if(dd.CollapsableRowsMigrated){
+
+	if dd.CollapsableRowsMigrated {
 		return "",false
 	}
+
 	ddNew.Title = dd.Title
 	ddNew.Description = dd.Description
 	ddNew.Tags = dd.Tags
@@ -72,6 +74,8 @@ func migrateDData(data string) (string,bool) {
 	ddNew.UploadedGrafana = dd.UploadedGrafana
 	ddNew.Uuid = dd.Uuid
 	ddNew.Layout = make([]Layout, len(dd.Layout))
+	
+	// added this new boolean to not affect already migrated dashboards
 	ddNew.CollapsableRowsMigrated = true
 
 	for i := range dd.Layout {
@@ -121,7 +125,7 @@ func migrateDashboards(){
 	for _, dashboard := range dashboards {
 		data, changed := migrateDData(dashboard.Data)
 
-		if(!changed){
+		if !changed {
 			log.Printf("Dashboard %s skipped migration as already updated\n", dashboard.Uuid)
 			continue
 		}
