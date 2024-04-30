@@ -18,16 +18,17 @@ type Dashboard struct {
 	Data      string    `json:"data" db:"data"`
 }
 type DashboardData struct {
-	Description     string                      `json:"description"`
-	Tags            []string                    `json:"tags"`
-	Name            string                      `json:"name"`
-	Layout          []Layout                    `json:"layout"`
-	Title           string                      `json:"title"`
-	Widgets         []map[string]interface{}    `json:"widgets"` 
-	Variables       map[string]interface{}      `json:"variables"`
-	Version         string                      `json:"version"`
-	UploadedGrafana bool                        `json:"uploadedGrafana"`
-	Uuid            string                      `json:"uuid"`
+	Description             string                      `json:"description"`
+	Tags                    []string                    `json:"tags"`
+	Name                    string                      `json:"name"`
+	Layout                  []Layout                    `json:"layout"`
+	Title                   string                      `json:"title"`
+	Widgets                 []map[string]interface{}    `json:"widgets"` 
+	Variables               map[string]interface{}      `json:"variables"`
+	Version                 string                      `json:"version"`
+	UploadedGrafana         bool                        `json:"uploadedGrafana"`
+	Uuid                    string                      `json:"uuid"`
+	CollapsableRowsMigrated bool                        `json:"collapsableRowsMigrated"`
 }
 
 type Layout struct {
@@ -50,13 +51,16 @@ func initDB(dataSourceName string) error {
 	return err
 }
 
-func migrateDData(data string) string {
+func migrateDData(data string) (string,bool) {
 	var dd *DashboardData
 	var ddNew DashboardData
 
 	err := json.Unmarshal([]byte(data), &dd)
 	if err != nil {
 		log.Fatalln(err)
+	}
+	if(dd.CollapsableRowsMigrated){
+		return "",false
 	}
 	ddNew.Title = dd.Title
 	ddNew.Description = dd.Description
@@ -68,6 +72,7 @@ func migrateDData(data string) string {
 	ddNew.UploadedGrafana = dd.UploadedGrafana
 	ddNew.Uuid = dd.Uuid
 	ddNew.Layout = make([]Layout, len(dd.Layout))
+	ddNew.CollapsableRowsMigrated = true
 
 	for i := range dd.Layout {
 		ddNew.Layout[i] = dd.Layout[i]
@@ -79,7 +84,7 @@ func migrateDData(data string) string {
 		log.Fatalln(err)
 	}
 
-	return string(newData)
+	return string(newData) , true
 }
 
 func updateData(id int, data string) {
@@ -114,7 +119,12 @@ func migrateDashboards(){
 	}
 
 	for _, dashboard := range dashboards {
-		data := migrateDData(dashboard.Data)
+		data, changed := migrateDData(dashboard.Data)
+
+		if(!changed){
+			log.Printf("Dashboard %s skipped migration as already updated\n", dashboard.Uuid)
+			continue
+		}
 		
 		dashboard.Data = data
 		updateData(dashboard.Id, dashboard.Data)
