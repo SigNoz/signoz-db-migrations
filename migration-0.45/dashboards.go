@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"log"
-	"time"
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
@@ -16,22 +15,19 @@ var (
 type Dashboard struct {
 	Id        int       `json:"id" db:"id"`
 	Uuid      string    `json:"uuid" db:"uuid"`
-	CreatedAt time.Time `json:"created_at" db:"created_at"`
-	CreateBy  *string   `json:"created_by" db:"created_by"`
-	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
-	UpdateBy  *string   `json:"updated_by" db:"updated_by"`
 	Data      string    `json:"data" db:"data"`
-	Locked    *int      `json:"isLocked" db:"locked"`
 }
 type DashboardData struct {
-	Description string                      `json:"description"`
-	Tags        []string                    `json:"tags"`
-	Name        string                      `json:"name"`
-	Layout      []Layout                    `json:"layout"`
-	Title       string                      `json:"title"`
-	Widgets     []map[string]interface{}    `json:"widgets"`
-	Variables   map[string]interface{}      `json:"variables"`
-	Version     string                      `json:"version"`
+	Description     string                      `json:"description"`
+	Tags            []string                    `json:"tags"`
+	Name            string                      `json:"name"`
+	Layout          []Layout                    `json:"layout"`
+	Title           string                      `json:"title"`
+	Widgets         []map[string]interface{}    `json:"widgets"` 
+	Variables       map[string]interface{}      `json:"variables"`
+	Version         string                      `json:"version"`
+	UploadedGrafana bool                        `json:"uploadedGrafana"`
+	Uuid            string                      `json:"uuid"`
 }
 
 type Layout struct {
@@ -69,6 +65,8 @@ func migrateDData(data string) string {
 	ddNew.Widgets = dd.Widgets
 	ddNew.Variables = dd.Variables
 	ddNew.Version = dd.Version
+	ddNew.UploadedGrafana = dd.UploadedGrafana
+	ddNew.Uuid = dd.Uuid
 	ddNew.Layout = make([]Layout, len(dd.Layout))
 
 	for i := range dd.Layout {
