@@ -13,22 +13,22 @@ var (
 )
 
 type Dashboard struct {
-	Id        int       `json:"id" db:"id"`
-	Uuid      string    `json:"uuid" db:"uuid"`
-	Data      string    `json:"data" db:"data"`
+	Id   int    `json:"id" db:"id"`
+	Uuid string `json:"uuid" db:"uuid"`
+	Data string `json:"data" db:"data"`
 }
 type DashboardData struct {
-	Description             string                      `json:"description"`
-	Tags                    []string                    `json:"tags"`
-	Name                    string                      `json:"name"`
-	Layout                  []Layout                    `json:"layout"`
-	Title                   string                      `json:"title"`
-	Widgets                 []map[string]interface{}    `json:"widgets"` 
-	Variables               map[string]interface{}      `json:"variables"`
-	Version                 string                      `json:"version"`
-	UploadedGrafana         bool                        `json:"uploadedGrafana"`
-	Uuid                    string                      `json:"uuid"`
-	CollapsableRowsMigrated bool                        `json:"collapsableRowsMigrated"`
+	Description             string                   `json:"description"`
+	Tags                    []string                 `json:"tags"`
+	Name                    string                   `json:"name"`
+	Layout                  []Layout                 `json:"layout"`
+	Title                   string                   `json:"title"`
+	Widgets                 []map[string]interface{} `json:"widgets"`
+	Variables               map[string]interface{}   `json:"variables"`
+	Version                 interface{}              `json:"version"`
+	UploadedGrafana         bool                     `json:"uploadedGrafana"`
+	Uuid                    string                   `json:"uuid"`
+	CollapsableRowsMigrated bool                     `json:"collapsableRowsMigrated"`
 }
 
 type Layout struct {
@@ -41,7 +41,6 @@ type Layout struct {
 	Y      int    `json:"y"`
 }
 
-
 // initDB initalize database
 func initDB(dataSourceName string) error {
 	var err error
@@ -51,17 +50,19 @@ func initDB(dataSourceName string) error {
 	return err
 }
 
-func migrateDData(data string) (string,bool) {
+func migrateDData(data string) (string, bool) {
 	var dd *DashboardData
 	var ddNew DashboardData
 
 	err := json.Unmarshal([]byte(data), &dd)
 	if err != nil {
-		log.Fatalln(err)
+		log.Printf("Cannot unmarshal the dashboard %s,%v", dd.Uuid, err)
+		return "", false
 	}
 
 	if dd.CollapsableRowsMigrated {
-		return "",false
+		log.Printf("Dashboard %s skipped migration as already updated\n", dd.Uuid)
+		return "", false
 	}
 
 	ddNew.Title = dd.Title
@@ -74,7 +75,7 @@ func migrateDData(data string) (string,bool) {
 	ddNew.UploadedGrafana = dd.UploadedGrafana
 	ddNew.Uuid = dd.Uuid
 	ddNew.Layout = make([]Layout, len(dd.Layout))
-	
+
 	// added this new boolean to not affect already migrated dashboards
 	ddNew.CollapsableRowsMigrated = true
 
@@ -85,10 +86,11 @@ func migrateDData(data string) (string,bool) {
 
 	newData, err := json.Marshal(ddNew)
 	if err != nil {
-		log.Fatalln(err)
+		log.Printf("Cannot marshal the dashboard %s,%v", dd.Uuid, err)
+		return "", false
 	}
 
-	return string(newData) , true
+	return string(newData), true
 }
 
 func updateData(id int, data string) {
@@ -104,7 +106,7 @@ func updateData(id int, data string) {
 	}
 }
 
-func migrateDashboards(){
+func migrateDashboards() {
 
 	var dashboards []Dashboard
 
@@ -126,10 +128,9 @@ func migrateDashboards(){
 		data, changed := migrateDData(dashboard.Data)
 
 		if !changed {
-			log.Printf("Dashboard %s skipped migration as already updated\n", dashboard.Uuid)
 			continue
 		}
-		
+
 		dashboard.Data = data
 		updateData(dashboard.Id, dashboard.Data)
 
@@ -139,4 +140,3 @@ func migrateDashboards(){
 	log.Println("Dashboards migrated")
 
 }
-
