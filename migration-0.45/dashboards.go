@@ -56,7 +56,7 @@ func migrateDData(data string) (string, bool) {
 
 	err := json.Unmarshal([]byte(data), &dd)
 	if err != nil {
-		log.Printf("Cannot unmarshal the dashboard %s,%v", dd.Uuid, err)
+		log.Printf("Cannot unmarshal the dashboard: %s, error: %v\n", dd.Uuid, err)
 		return "", false
 	}
 
@@ -86,7 +86,7 @@ func migrateDData(data string) (string, bool) {
 
 	newData, err := json.Marshal(ddNew)
 	if err != nil {
-		log.Printf("Cannot marshal the dashboard %s,%v", dd.Uuid, err)
+		log.Printf("Cannot marshal the dashboard: %s, error: %v\n", dd.Uuid, err)
 		return "", false
 	}
 
