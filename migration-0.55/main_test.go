@@ -1,6 +1,8 @@
 package main
 
-import "testing"
+import (
+	"testing"
+)
 
 func Test_parseTTL(t *testing.T) {
 	type args struct {
@@ -59,6 +61,36 @@ func Test_parseTTL(t *testing.T) {
 			}
 			if gotColdStorageName != tt.coldStorageName {
 				t.Errorf("parseTTL() gotColdStorageName = %v, want %v", gotMoveTTL, tt.wantMoveTTL)
+			}
+		})
+	}
+}
+
+func Test_hasMaterializedColumn(t *testing.T) {
+	type args struct {
+		tableStatement string
+		field          string
+		dataType       string
+	}
+	tests := []struct {
+		name string
+		args args
+		want bool
+	}{
+		{
+			name: "Test_hasMaterializedColumn",
+			args: args{
+				tableStatement: "`resource_string_telemetry$$sdk$$language` String DEFAULT resources_string_value[indexOf(resources_string_key, 'telemetry.sdk.language')] CODEC(ZSTD(1)),`resource_string_telemetry$$sdk$$language_exists` Bool DEFAULT if(indexOf(resources_string_key, 'telemetry.sdk.language') != 0, true, false) CODEC(ZSTD(1)),",
+				field:          "resource_string_telemetry\\$\\$sdk\\$\\$language",
+				dataType:       "string",
+			},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasMaterializedColumn(tt.args.tableStatement, tt.args.field, tt.args.dataType); got != tt.want {
+				t.Errorf("hasMaterializedColumn() = %v, want %v", got, tt.want)
 			}
 		})
 	}

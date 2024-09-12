@@ -14,6 +14,27 @@ import (
 	"go.uber.org/zap"
 )
 
+type LogField struct {
+	Name      string `json:"name" ch:"name"`
+	DataType  string `json:"dataType" ch:"datatype"`
+	Type      string `json:"type"`
+	IndexType string `json:"indexType"`
+}
+
+type ShowCreateTableStatement struct {
+	Statement string `json:"statement" ch:"statement"`
+}
+
+const (
+	attribute = "attribute"
+	resource  = "resource"
+)
+
+type TTLResp struct {
+	EngineFull string `ch:"engine_full"`
+}
+
+// Connection for clickhouse
 func connect(host string, port string, userName string, password string) (clickhouse.Conn, error) {
 	var (
 		ctx       = context.Background()
@@ -39,42 +60,28 @@ func connect(host string, port string, userName string, password string) (clickh
 	return conn, nil
 }
 
-type LogField struct {
-	Name      string `json:"name" ch:"name"`
-	DataType  string `json:"dataType" ch:"datatype"`
-	Type      string `json:"type"`
-	IndexType string `json:"indexType"`
-}
-
-type ShowCreateTableStatement struct {
-	Statement string `json:"statement" ch:"statement"`
-}
-
-const (
-	attribute = "attribute"
-	resource  = "resource"
-)
-
 // in the new schema we are completely removing support for old underscore attributes
-func removeUnderscoreFields(fields []LogField, tablestatement string) []LogField {
-	lookup1 := map[string]LogField{}
+// so we are not copying them
+func removeUnderscoreFields(fields []LogField, tableStatement string) []LogField {
+	lookup := map[string]LogField{}
 	for _, v := range fields {
-		lookup1[v.Name+v.DataType] = v
+		lookup[v.Name+v.DataType] = v
 	}
 
 	// if the corresponding underscore attribute exists then remove it from lookup
-	for k, _ := range lookup1 {
+	for k, _ := range lookup {
 		if strings.Contains(k, ".") {
-			if _, ok := lookup1[strings.ReplaceAll(k, ".", "_")]; ok {
-				delete(lookup1, strings.ReplaceAll(k, ".", "_"))
+			if _, ok := lookup[strings.ReplaceAll(k, ".", "_")]; ok {
+				delete(lookup, strings.ReplaceAll(k, ".", "_"))
 			}
 		}
 	}
 
+	// check if the fields are materialized and only return the materialized ones
 	newFields := []LogField{}
-	for _, val := range lookup1 {
-		colname := fmt.Sprintf("%s_%s_%s", strings.ToLower(val.Type), strings.ToLower(val.DataType), strings.ReplaceAll(val.Name, ".", "$$"))
-		if !hasMaterializedColumn(tablestatement, colname, val.DataType) {
+	for _, val := range lookup {
+		colname := fmt.Sprintf("%s_%s_%s", strings.ToLower(val.Type), strings.ToLower(val.DataType), strings.ReplaceAll(val.Name, ".", "\\$\\$"))
+		if hasMaterializedColumn(tableStatement, colname, strings.ToLower(val.DataType)) {
 			newFields = append(newFields, val)
 		}
 	}
@@ -82,7 +89,8 @@ func removeUnderscoreFields(fields []LogField, tablestatement string) []LogField
 	return newFields
 }
 
-func GetFields(conn clickhouse.Conn) ([]LogField, error) {
+// return all fields which needs to add to new schema
+func GetSelectedFields(conn clickhouse.Conn) ([]LogField, error) {
 	ctx := context.Background()
 	// get attribute keys
 	attributes := []LogField{}
@@ -110,7 +118,7 @@ func GetFields(conn clickhouse.Conn) ([]LogField, error) {
 		resources[i].Type = resource
 	}
 
-	statement, err := GetTableStatement(conn)
+	statement, err := getTableStatement(conn)
 	if err != nil {
 		zap.S().Error(fmt.Errorf("error while table statement. Err=%v", err))
 		return nil, err
@@ -124,7 +132,7 @@ func GetFields(conn clickhouse.Conn) ([]LogField, error) {
 	return attributes, nil
 }
 
-func GetTableStatement(conn clickhouse.Conn) (string, error) {
+func getTableStatement(conn clickhouse.Conn) (string, error) {
 	ctx := context.Background()
 	statements := []ShowCreateTableStatement{}
 	query := "SHOW CREATE TABLE signoz_logs.logs"
@@ -139,6 +147,8 @@ func GetTableStatement(conn clickhouse.Conn) (string, error) {
 func hasMaterializedColumn(tableStatement, field, dataType string) bool {
 	// check the type as well
 	regex := fmt.Sprintf("`%s` (?i)(%s) DEFAULT", field, dataType)
+	fmt.Println(regex)
+	// fmt.Println(tableStatement)
 	res, err := regexp.MatchString(regex, tableStatement)
 	if err != nil {
 		zap.S().Error(fmt.Errorf("error while matching regex. Err=%v", err))
@@ -147,12 +157,23 @@ func hasMaterializedColumn(tableStatement, field, dataType string) bool {
 	return res
 }
 
+func getClickhouseLogsColumnDataType(dataType string) string {
+	dataType = strings.ToLower(dataType)
+	if dataType == "int64" || dataType == "float64" {
+		return "number"
+	}
+	if dataType == "bool" {
+		return "bool"
+	}
+	return "string"
+}
+
 func addMaterializedColumnsAndAddIndex(conn clickhouse.Conn, fields []LogField) error {
 	ctx := context.Background()
 	for _, field := range fields {
 		// columns name is <type>_<name>_<datatype>
-		colname := fmt.Sprintf("%s_%s_%s", strings.ToLower(field.Type), strings.ToLower(field.DataType), strings.ReplaceAll(field.Name, ".", "$$"))
-		keyColName := fmt.Sprintf("%s_%s", field.Type+"s", strings.ToLower(field.DataType))
+		colname := fmt.Sprintf("%s_%s_%s", strings.ToLower(field.Type), getClickhouseLogsColumnDataType(field.DataType), strings.ReplaceAll(field.Name, ".", "$$"))
+		keyColName := fmt.Sprintf("%s_%s", field.Type+"s", getClickhouseLogsColumnDataType(field.DataType))
 
 		// create column in logs table
 		for _, table := range []string{"logs_v2", "distributed_logs_v2"} {
@@ -194,17 +215,10 @@ func addMaterializedColumnsAndAddIndex(conn clickhouse.Conn, fields []LogField) 
 	return nil
 }
 
-type TTLResp struct {
-	EngineFull string `ch:"engine_full"`
-}
-
 func parseTTL(queryResp string) (delTTL int, moveTTL int, coldStorageName string, err error) {
-
 	zap.L().Info("Parsing TTL from: ", zap.String("queryResp", queryResp))
 	deleteTTLExp := regexp.MustCompile(`toIntervalSecond\(([0-9]*)\)`)
 	moveTTLExp := regexp.MustCompile(`toIntervalSecond\(([0-9]*)\) TO VOLUME '(?P<name>\S+)'`)
-
-	// moveTTLExp := regexp.MustCompile(`TO VOLUME ''`)
 
 	delTTL, moveTTL = -1, -1
 
@@ -306,37 +320,44 @@ func main() {
 		zap.S().Fatal("Error while connecting to clickhouse", zap.Error(err))
 	}
 
-	fields, err := GetFields(conn)
+	// get the fields to be added to new schema
+	fields, err := GetSelectedFields(conn)
 	if err != nil {
 		zap.S().Fatal("Error while getting fields", zap.Error(err))
 		os.Exit(1)
 	}
 
-	fmt.Println(fields)
-
+	// add the fields to new schema
 	err = addMaterializedColumnsAndAddIndex(conn, fields)
 	if err != nil {
 		zap.S().Fatal("Error while renaming materialized columns", zap.Error(err))
 		os.Exit(1)
 
 	}
+
+	// get the ttl of the old table
 	delOld, moveOld, oldColdStorageName, err := GetTTL(conn, "logs")
 	if err != nil {
 		zap.S().Error(err.Error())
 	}
+
+	// get the ttl of the current table
 	delCurr, moveCurr, _, err := GetTTL(conn, "logs_v2")
 	if err != nil {
 		zap.S().Error(err.Error())
 	}
 
+	// if current table cold storage is configured don't change it.
 	if moveCurr != -1 {
 		zap.S().Info("Since cold storage is already set not changing it")
 	}
 
+	// if ttl is same don't change it
 	if delOld == delCurr && moveOld == moveCurr {
 		zap.S().Info("no change is required, TTL is same")
 	}
 
+	zap.S().Info(fmt.Sprintf("Setting TTL values: delete:%v, move: %v, coldStorage: %s", delOld, moveOld, oldColdStorageName))
 	// update the TTL
 	err = updateTTL(conn, delOld, moveOld, oldColdStorageName)
 	if err != nil {
