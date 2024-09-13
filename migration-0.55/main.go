@@ -147,8 +147,7 @@ func getTableStatement(conn clickhouse.Conn) (string, error) {
 func hasMaterializedColumn(tableStatement, field, dataType string) bool {
 	// check the type as well
 	regex := fmt.Sprintf("`%s` (?i)(%s) DEFAULT", field, dataType)
-	fmt.Println(regex)
-	// fmt.Println(tableStatement)
+
 	res, err := regexp.MatchString(regex, tableStatement)
 	if err != nil {
 		zap.S().Error(fmt.Errorf("error while matching regex. Err=%v", err))
