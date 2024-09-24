@@ -283,8 +283,8 @@ func updateTTL(conn clickhouse.Conn, delTTL, moveTTL int, coldVolume string) err
 			}
 		}
 
-		q += " SETTINGS distributed_ddl_task_timeout = -1"
-		qRes += " SETTINGS distributed_ddl_task_timeout = -1"
+		q += " SETTINGS materialize_ttl_after_modify = 0"
+		qRes += " SETTINGS materialize_ttl_after_modify = 0"
 
 		err := conn.Exec(context.Background(), q)
 		if err != nil {
