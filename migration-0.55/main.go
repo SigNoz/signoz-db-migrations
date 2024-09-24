@@ -329,7 +329,7 @@ func main() {
 	// add the fields to new schema
 	err = addMaterializedColumnsAndAddIndex(conn, fields)
 	if err != nil {
-		zap.S().Fatal("Error while renaming materialized columns", zap.Error(err))
+		zap.S().Fatal("Error while adding materialized columns", zap.Error(err))
 		os.Exit(1)
 
 	}
