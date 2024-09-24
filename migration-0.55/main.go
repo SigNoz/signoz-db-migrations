@@ -354,13 +354,13 @@ func main() {
 	// if ttl is same don't change it
 	if delOld == delCurr && moveOld == moveCurr {
 		zap.S().Info("no change is required, TTL is same")
-	}
-
-	zap.S().Info(fmt.Sprintf("Setting TTL values: delete:%v, move: %v, coldStorage: %s", delOld, moveOld, oldColdStorageName))
-	// update the TTL
-	err = updateTTL(conn, delOld, moveOld, oldColdStorageName)
-	if err != nil {
-		zap.S().Error(err.Error())
+	} else {
+		zap.S().Info(fmt.Sprintf("Setting TTL values: delete:%v, move: %v, coldStorage: %s", delOld, moveOld, oldColdStorageName))
+		// update the TTL
+		err = updateTTL(conn, delOld, moveOld, oldColdStorageName)
+		if err != nil {
+			zap.S().Error(err.Error())
+		}
 	}
 	zap.S().Info(fmt.Sprintf("Completed migration in: %s", time.Since(start)))
 }
