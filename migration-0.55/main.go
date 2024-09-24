@@ -177,14 +177,14 @@ func addMaterializedColumnsAndAddIndex(conn clickhouse.Conn, cluster string, fie
 		// create column in logs table
 		for _, table := range []string{"logs_v2", "distributed_logs_v2"} {
 			zap.S().Info(fmt.Sprintf("creating materialized for: %s i.e %s", field.Name, colname))
-			query := fmt.Sprintf("ALTER TABLE signoz_logs.%s on cluster %s ADD COLUMN IF NOT EXISTS %s %s DEFAULT %s['%s'] CODEC(ZSTD(1))",
+			query := fmt.Sprintf("ALTER TABLE signoz_logs.%s on cluster %s ADD COLUMN IF NOT EXISTS `%s` %s DEFAULT %s['%s'] CODEC(ZSTD(1))",
 				table, cluster, colname, field.DataType, keyColName, field.Name)
 			err := conn.Exec(context.Background(), query)
 			if err != nil {
 				zap.S().Error(fmt.Errorf("error while creating materialized column on logs table. Err=%v", err))
 			}
 
-			query = fmt.Sprintf("ALTER TABLE signoz_logs.%s ON CLUSTER %s ADD COLUMN IF NOT EXISTS %s_exists bool DEFAULT if(mapContains(%s, '%s') != 0, true, false) CODEC(ZSTD(1))",
+			query = fmt.Sprintf("ALTER TABLE signoz_logs.%s ON CLUSTER %s ADD COLUMN IF NOT EXISTS `%s_exists` bool DEFAULT if(mapContains(%s, '%s') != 0, true, false) CODEC(ZSTD(1))",
 				table,
 				cluster,
 				colname,
@@ -204,7 +204,7 @@ func addMaterializedColumnsAndAddIndex(conn clickhouse.Conn, cluster string, fie
 		}
 
 		zap.S().Info(fmt.Sprintf("Create index: %s_idx", colname))
-		query := fmt.Sprintf("ALTER TABLE signoz_logs.logs_v2 on cluster %s ADD INDEX IF NOT EXISTS %s_idx (%s) TYPE bloom_filter(0.01) GRANULARITY 64", cluster, colname, colname)
+		query := fmt.Sprintf("ALTER TABLE signoz_logs.logs_v2 on cluster %s ADD INDEX IF NOT EXISTS `%s_idx` (`%s`) TYPE bloom_filter(0.01) GRANULARITY 64", cluster, colname, colname)
 		err := conn.Exec(context.Background(), query)
 		if err != nil {
 			zap.S().Error(fmt.Errorf("error while renaming index. Err=%v", err))
