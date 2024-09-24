@@ -167,7 +167,7 @@ func getClickhouseLogsColumnDataType(dataType string) string {
 	return "string"
 }
 
-func addMaterializedColumnsAndAddIndex(conn clickhouse.Conn, fields []LogField) error {
+func addMaterializedColumnsAndAddIndex(conn clickhouse.Conn, cluster string, fields []LogField) error {
 	ctx := context.Background()
 	for _, field := range fields {
 		// columns name is <type>_<name>_<datatype>
@@ -177,15 +177,16 @@ func addMaterializedColumnsAndAddIndex(conn clickhouse.Conn, fields []LogField) 
 		// create column in logs table
 		for _, table := range []string{"logs_v2", "distributed_logs_v2"} {
 			zap.S().Info(fmt.Sprintf("creating materialized for: %s i.e %s", field.Name, colname))
-			query := fmt.Sprintf("ALTER TABLE signoz_logs.%s on cluster cluster ADD COLUMN IF NOT EXISTS %s %s DEFAULT %s['%s'] CODEC(ZSTD(1))",
-				table, colname, field.DataType, keyColName, field.Name)
+			query := fmt.Sprintf("ALTER TABLE signoz_logs.%s on cluster %s ADD COLUMN IF NOT EXISTS %s %s DEFAULT %s['%s'] CODEC(ZSTD(1))",
+				table, cluster, colname, field.DataType, keyColName, field.Name)
 			err := conn.Exec(context.Background(), query)
 			if err != nil {
 				zap.S().Error(fmt.Errorf("error while creating materialized column on logs table. Err=%v", err))
 			}
 
-			query = fmt.Sprintf("ALTER TABLE signoz_logs.%s ON CLUSTER cluster ADD COLUMN IF NOT EXISTS %s_exists bool DEFAULT if(mapContains(%s, '%s') != 0, true, false) CODEC(ZSTD(1))",
+			query = fmt.Sprintf("ALTER TABLE signoz_logs.%s ON CLUSTER %s ADD COLUMN IF NOT EXISTS %s_exists bool DEFAULT if(mapContains(%s, '%s') != 0, true, false) CODEC(ZSTD(1))",
 				table,
+				cluster,
 				colname,
 				keyColName,
 				field.Name,
@@ -203,7 +204,7 @@ func addMaterializedColumnsAndAddIndex(conn clickhouse.Conn, fields []LogField) 
 		}
 
 		zap.S().Info(fmt.Sprintf("Create index: %s_idx", colname))
-		query := fmt.Sprintf("ALTER TABLE signoz_logs.logs_v2 on cluster cluster ADD INDEX IF NOT EXISTS %s_idx (%s) TYPE bloom_filter(0.01) GRANULARITY 64", colname, colname)
+		query := fmt.Sprintf("ALTER TABLE signoz_logs.logs_v2 on cluster %s ADD INDEX IF NOT EXISTS %s_idx (%s) TYPE bloom_filter(0.01) GRANULARITY 64", cluster, colname, colname)
 		err := conn.Exec(context.Background(), query)
 		if err != nil {
 			zap.S().Error(fmt.Errorf("error while renaming index. Err=%v", err))
@@ -262,11 +263,11 @@ func GetTTL(conn clickhouse.Conn, tableName string) (int, int, string, error) {
 	return -1, -1, "", nil
 }
 
-func updateTTL(conn clickhouse.Conn, delTTL, moveTTL int, coldVolume string) error {
+func updateTTL(conn clickhouse.Conn, cluster string, delTTL, moveTTL int, coldVolume string) error {
 	if delTTL != -1 {
-		q := "ALTER TABLE signoz_logs.logs_v2 ON CLUSTER cluster MODIFY TTL toDateTime(timestamp / 1000000000) + " +
+		q := "ALTER TABLE signoz_logs.logs_v2 ON CLUSTER " + cluster + " MODIFY TTL toDateTime(timestamp / 1000000000) + " +
 			fmt.Sprintf("INTERVAL %v SECOND DELETE", delTTL)
-		qRes := "ALTER TABLE signoz_logs.logs_v2_resource ON CLUSTER cluster MODIFY TTL toDateTime(seen_at_ts_bucket_start) + toIntervalSecond(1800) + " +
+		qRes := "ALTER TABLE signoz_logs.logs_v2_resource ON CLUSTER " + cluster + " MODIFY TTL toDateTime(seen_at_ts_bucket_start) + toIntervalSecond(1800) + " +
 			fmt.Sprintf("INTERVAL %v SECOND DELETE", delTTL)
 
 		if moveTTL != -1 {
@@ -274,7 +275,7 @@ func updateTTL(conn clickhouse.Conn, delTTL, moveTTL int, coldVolume string) err
 			qRes += fmt.Sprintf(", toDateTime(seen_at_ts_bucket_start) + toIntervalSecond(1800) + INTERVAL %v SECOND TO VOLUME '%s'", moveTTL, coldVolume)
 
 			for _, table := range []string{"logs_v2", "logs_v2_resource"} {
-				policyReq := fmt.Sprintf("ALTER TABLE signoz_logs.%s ON CLUSTER cluster MODIFY SETTING storage_policy='tiered'", table)
+				policyReq := fmt.Sprintf("ALTER TABLE signoz_logs.%s ON CLUSTER %s MODIFY SETTING storage_policy='tiered'", table, cluster)
 				err := conn.Exec(context.Background(), policyReq)
 				if err != nil {
 					zap.S().Error(fmt.Errorf("error while setting storage policy. Err=%v", err))
@@ -311,6 +312,7 @@ func main() {
 	portFlag := flag.String("port", "9000", "clickhouse port")
 	userNameFlag := flag.String("userName", "default", "clickhouse username")
 	passwordFlag := flag.String("password", "", "clickhouse password")
+	cluster := flag.String("cluster", "cluster", "clickhouse cluster")
 	flag.Parse()
 	zap.S().Debug(fmt.Sprintf("Params: %s %s %s", *hostFlag, *portFlag, *userNameFlag))
 
@@ -327,7 +329,7 @@ func main() {
 	}
 
 	// add the fields to new schema
-	err = addMaterializedColumnsAndAddIndex(conn, fields)
+	err = addMaterializedColumnsAndAddIndex(conn, *cluster, fields)
 	if err != nil {
 		zap.S().Fatal("Error while adding materialized columns", zap.Error(err))
 		os.Exit(1)
@@ -357,7 +359,7 @@ func main() {
 	} else {
 		zap.S().Info(fmt.Sprintf("Setting TTL values: delete:%v, move: %v, coldStorage: %s", delOld, moveOld, oldColdStorageName))
 		// update the TTL
-		err = updateTTL(conn, delOld, moveOld, oldColdStorageName)
+		err = updateTTL(conn, *cluster, delOld, moveOld, oldColdStorageName)
 		if err != nil {
 			zap.S().Error(err.Error())
 		}
