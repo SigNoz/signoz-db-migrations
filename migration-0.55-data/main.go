@@ -145,11 +145,11 @@ func processBatchesOfLogs(sourceConn, destConn clickhouse.Conn, startTimestamp, 
 
 		// process the data according to the batch size
 		for i := 0; i < len; i += batchSize {
-			end := i + batchSize
-			if end > len {
-				end = len // Adjust the end if it exceeds the array length
+			batchEnd := i + batchSize
+			if batchEnd > len {
+				batchEnd = len // Adjust the end if it exceeds the array length
 			}
-			batch := data[i:end]
+			batch := data[i:batchEnd]
 
 			// process the batch of data
 			err = processAndWriteBatch(destConn, batch, destTableName, destResourceTableName)
