@@ -1,4 +1,4 @@
-FROM golang:1.18-alpine AS builder
+FROM golang:1.21-alpine AS builder
 
 RUN apk --update add \
     util-linux-dev \
