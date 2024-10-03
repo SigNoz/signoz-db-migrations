@@ -70,11 +70,11 @@ func connect(host string, port string, userName string, password string, databas
 	return conn, nil
 }
 
-func getCountOfLogs(conn clickhouse.Conn, endTimestamp int64, tableName string) uint64 {
+func getCountOfLogs(conn clickhouse.Conn, startTimestamp, endTimestamp int64, tableName string) uint64 {
 	ctx := context.Background()
-	q := fmt.Sprintf("SELECT count(*) as count FROM %s WHERE timestamp <= ?", tableName)
+	q := fmt.Sprintf("SELECT count(*) as count FROM %s WHERE timestamp> ? and timestamp <= ?", tableName)
 	var count uint64
-	err := conn.QueryRow(ctx, q, endTimestamp).Scan(&count)
+	err := conn.QueryRow(ctx, q, startTimestamp, endTimestamp).Scan(&count)
 	if err != nil {
 		zap.S().Error(fmt.Errorf("error while getting count of logs. Err=%v \n", err))
 		return 0
@@ -82,7 +82,7 @@ func getCountOfLogs(conn clickhouse.Conn, endTimestamp int64, tableName string) 
 	return count
 }
 
-// fetchBatchWithTimestamp retrieves a batch of 30K timestamps and the last timestamp in the batch
+// fetchBatch retrieves all data in the timerange
 func fetchBatch(conn clickhouse.Conn, tableName string, start, end int64) ([]SigNozLog, error) {
 	var logs []SigNozLog
 	ctx := context.Background()
@@ -107,8 +107,7 @@ func fetchBatch(conn clickhouse.Conn, tableName string, start, end int64) ([]Sig
 	return logs, nil
 }
 
-// it tries to get logs by using timestamp as the key.
-// but if it lands in a timestamp which is not unique it will use limit offset for the next batch
+// it fetches logs from the sourceConn and writes to the destConn
 func processBatchesOfLogs(sourceConn, destConn clickhouse.Conn, startTimestamp, endTimestamp int64, batchDuration, batchSize int, sourceTableName, destTableName, destResourceTableName string) error {
 
 	// convert minutes to ns
@@ -169,6 +168,7 @@ func tsBucket(ts int64, bucketSize int64) int64 {
 	return (int64(ts) / int64(bucketSize)) * int64(bucketSize)
 }
 
+// writes a single batch to destConn
 func processAndWriteBatch(destConn clickhouse.Conn, logs []SigNozLog, destTableName, destResourceTableName string) error {
 	ctx := context.Background()
 
@@ -343,7 +343,7 @@ func main() {
 	defer destConn.Close()
 
 	// get the total count of logs for that range of time.
-	count := getCountOfLogs(sourceConn, *endTimestamp, *sourceTableName)
+	count := getCountOfLogs(sourceConn, *startTimestamp, *endTimestamp, *sourceTableName)
 	if count == 0 {
 		zap.S().Info("No logs to migrate")
 		os.Exit(0)
