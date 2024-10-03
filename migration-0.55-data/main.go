@@ -315,8 +315,12 @@ func main() {
 	start := time.Now()
 	hostFlag := flag.String("host", "127.0.0.1", "clickhouse host")
 	portFlag := flag.String("port", "9000", "clickhouse port")
-	userNameFlag := flag.String("userName", "default", "clickhouse username")
+	destHostFlag := flag.String("dest_host", "127.0.0.1", "clickhouse host")
+	destPortFlag := flag.String("dest_port", "9000", "clickhouse port")
+	userNameFlag := flag.String("username", "default", "clickhouse username")
 	passwordFlag := flag.String("password", "", "clickhouse password")
+	destUserNameFlag := flag.String("dest_username", "default", "clickhouse username")
+	destPasswordFlag := flag.String("dest_password", "", "clickhouse password")
 	batchDuration := flag.Int("batch_duration", 5, "batch duration in minutes")
 	batchSize := flag.Int("batch_size", 30000, "clickhouse password")
 	startTimestamp := flag.Int64("start_ts", 0, "start timestamp in ns")
@@ -335,7 +339,7 @@ func main() {
 	}
 	defer sourceConn.Close()
 
-	destConn, err := connect("localhost", *portFlag, *userNameFlag, *passwordFlag, *destDbName)
+	destConn, err := connect(*destHostFlag, *destPortFlag, *destUserNameFlag, *destPasswordFlag, *destDbName)
 	if err != nil {
 		zap.S().Fatal("Error while connecting to clickhouse", zap.Error(err))
 	}
