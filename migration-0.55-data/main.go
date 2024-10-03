@@ -47,7 +47,7 @@ type statementSendDuration struct {
 
 func connect(host string, port string, userName string, password string, database string) (clickhouse.Conn, error) {
 	var (
-		ctx       = context.TODO()
+		ctx       = context.Background()
 		conn, err = clickhouse.Open(&clickhouse.Options{
 			Addr: []string{fmt.Sprintf("%s:%s", host, port)},
 			Auth: clickhouse.Auth{
