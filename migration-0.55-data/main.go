@@ -45,13 +45,13 @@ type statementSendDuration struct {
 	duration time.Duration
 }
 
-func connect(host string, port string, userName string, password string) (clickhouse.Conn, error) {
+func connect(host string, port string, userName string, password string, database string) (clickhouse.Conn, error) {
 	var (
-		ctx       = context.Background()
+		ctx       = context.TODO()
 		conn, err = clickhouse.Open(&clickhouse.Options{
 			Addr: []string{fmt.Sprintf("%s:%s", host, port)},
 			Auth: clickhouse.Auth{
-				Database: "default",
+				Database: database,
 				Username: userName,
 				Password: password,
 			},
@@ -70,9 +70,9 @@ func connect(host string, port string, userName string, password string) (clickh
 	return conn, nil
 }
 
-func getCountOfLogs(conn clickhouse.Conn, endTimestamp int64, dbName, tableName string) uint64 {
+func getCountOfLogs(conn clickhouse.Conn, endTimestamp int64, tableName string) uint64 {
 	ctx := context.Background()
-	q := fmt.Sprintf("SELECT count(*) as count FROM %s.%s WHERE timestamp < ?", dbName, tableName)
+	q := fmt.Sprintf("SELECT count(*) as count FROM %s WHERE timestamp <= ?", tableName)
 	var count uint64
 	err := conn.QueryRow(ctx, q, endTimestamp).Scan(&count)
 	if err != nil {
@@ -82,27 +82,9 @@ func getCountOfLogs(conn clickhouse.Conn, endTimestamp int64, dbName, tableName 
 	return count
 }
 
-func checkTimestampUniqueness(conn clickhouse.Conn, dbName, tableName string, timestamp int64) (bool, error) {
-	var count uint64
-	query := fmt.Sprintf(`
-		SELECT count() 
-		FROM %s.%s 
-		WHERE timestamp = ?
-	`, dbName, tableName)
-
-	ctx := context.Background()
-	err := conn.QueryRow(ctx, query, timestamp).Scan(&count)
-	if err != nil {
-		return false, err
-	}
-
-	return count == 1, nil // Unique if count is 1
-}
-
 // fetchBatchWithTimestamp retrieves a batch of 30K timestamps and the last timestamp in the batch
-func fetchBatchWithTimestamp(conn clickhouse.Conn, dbName, tableName string, endTimestamp, offset, limit int64) ([]SigNozLog, int64, error) {
+func fetchBatch(conn clickhouse.Conn, tableName string, start, end int64) ([]SigNozLog, error) {
 	var logs []SigNozLog
-	var lastTimestamp uint64
 	ctx := context.Background()
 
 	// converting attributes_int64 and attributes_float64 to attributes_number while selecting from the old table
@@ -111,64 +93,73 @@ func fetchBatchWithTimestamp(conn clickhouse.Conn, dbName, tableName string, end
 		"CAST((attributes_string_key, attributes_string_value), 'Map(String, String)') as  attributes_string," +
 		"CAST((arrayConcat(attributes_int64_key, attributes_float64_key), arrayConcat(CAST(attributes_int64_value AS Array(Float64)), attributes_float64_value)), 'Map(String, Float64)') as  attributes_number," +
 		"CAST((attributes_bool_key, attributes_bool_value), 'Map(String, Bool)') as  attributes_bool," +
-		"CAST((resources_string_key, resources_string_value), 'Map(String, String)') as resources_string from %s.%s " +
-		"where timestamp < ? order by timestamp desc limit ? offset ?"
+		"CAST((resources_string_key, resources_string_value), 'Map(String, String)') as resources_string from %s " +
+		"where timestamp > ? and timestamp <= ?"
 
-	query = fmt.Sprintf(query, dbName, tableName)
+	query = fmt.Sprintf(query, tableName)
 
-	err := conn.Select(ctx, &logs, query, endTimestamp, limit, offset)
+	err := conn.Select(ctx, &logs, query, start, end)
 	if err != nil {
 		zap.S().Error(fmt.Errorf("error while reading logs. Err=%v \n", err))
-		return nil, 0, err
+		return nil, err
 	}
-	if len(logs) == 0 {
-		return nil, 0, nil
-	}
-	lastTimestamp = logs[len(logs)-1].Timestamp
 
-	return logs, int64(lastTimestamp), nil
+	return logs, nil
 }
 
 // it tries to get logs by using timestamp as the key.
 // but if it lands in a timestamp which is not unique it will use limit offset for the next batch
-func processBatchesOfLogs(sourceConn, destConn clickhouse.Conn, endTimestamp, batchSize int64, sourceDbName, destDbName, sourceTableName, destTableName, destResourceTableName string) error {
-	var lastTimestamp int64
-	offset := int64(0)
+func processBatchesOfLogs(sourceConn, destConn clickhouse.Conn, startTimestamp, endTimestamp int64, batchDuration, batchSize int, sourceTableName, destTableName, destResourceTableName string) error {
 
+	// convert minutes to ns
+	batchDurationNs := int64(batchDuration) * 60 * 1e9
+
+	var start int64
+	end := endTimestamp
+
+	var done bool
+
+	// we will need start and end
 	for {
-		// Fetch a batch of 30K rows
-		batch, tempLastTimestamp, err := fetchBatchWithTimestamp(sourceConn, sourceDbName, sourceTableName, endTimestamp, offset, batchSize)
-		if err != nil {
-			return err
-		}
 
-		// If the batch is empty, exit the loop
-		if len(batch) == 0 {
+		if done {
 			break
 		}
 
-		// process the batch of data
-		err = processAndWriteBatch(destConn, batch, destDbName, destTableName, destResourceTableName)
+		start = end - batchDurationNs
+
+		// last duration
+		if start < startTimestamp {
+			start = startTimestamp
+			done = true
+		}
+
+		// Fetch all rows in that time range i.e >start and <=end
+		data, err := fetchBatch(sourceConn, sourceTableName, start, end)
 		if err != nil {
 			return err
 		}
 
-		// Check if the last entry's timestamp is unique
-		isUnique, err := checkTimestampUniqueness(sourceConn, sourceDbName, sourceTableName, lastTimestamp)
-		if err != nil {
-			return err
+		len := len(data)
+
+		zap.L().Debug("migrating data: ", zap.Int64("start", start), zap.Int64("end", end), zap.Int("length", len))
+
+		// process the data according to the batch size
+		for i := 0; i < len; i += batchSize {
+			end := i + batchSize
+			if end > len {
+				end = len // Adjust the end if it exceeds the array length
+			}
+			batch := data[i:end]
+
+			// process the batch of data
+			err = processAndWriteBatch(destConn, batch, destTableName, destResourceTableName)
+			if err != nil {
+				return err
+			}
 		}
 
-		// If unique, collect the timestamps; if not, increment the offset and continue
-		if isUnique {
-			zap.S().Info(fmt.Sprintf("Found unique timestamp %d \n", lastTimestamp))
-			lastTimestamp = tempLastTimestamp
-			// reset offset to 0
-			offset = 0
-		} else {
-			zap.S().Info(fmt.Sprintf("Found non-unique timestamp %d. Incrementing offset to %d \n", lastTimestamp, offset+batchSize))
-			offset += batchSize
-		}
+		end = start
 	}
 
 	return nil
@@ -178,7 +169,7 @@ func tsBucket(ts int64, bucketSize int64) int64 {
 	return (int64(ts) / int64(bucketSize)) * int64(bucketSize)
 }
 
-func processAndWriteBatch(destConn clickhouse.Conn, logs []SigNozLog, destDbName, destTableName, destResourceTableName string) error {
+func processAndWriteBatch(destConn clickhouse.Conn, logs []SigNozLog, destTableName, destResourceTableName string) error {
 	ctx := context.Background()
 
 	// go through each log and generate fingerprint for the batch
@@ -198,7 +189,7 @@ func processAndWriteBatch(destConn clickhouse.Conn, logs []SigNozLog, destDbName
 
 	insertLogsStmtV2, err := destConn.PrepareBatch(
 		ctx,
-		fmt.Sprintf(insertLogsSQLTemplateV2, destDbName, destTableName),
+		fmt.Sprintf(insertLogsSQLTemplateV2, destTableName),
 		driver.WithReleaseConnection(),
 	)
 	if err != nil {
@@ -260,7 +251,7 @@ func processAndWriteBatch(destConn clickhouse.Conn, logs []SigNozLog, destDbName
 
 	insertResourcesStmtV2, err = destConn.PrepareBatch(
 		ctx,
-		fmt.Sprintf("INSERT into %s.%s", destDbName, destResourceTableName),
+		fmt.Sprintf("INSERT into %s", destResourceTableName),
 		driver.WithReleaseConnection(),
 	)
 	if err != nil {
@@ -326,7 +317,9 @@ func main() {
 	portFlag := flag.String("port", "9000", "clickhouse port")
 	userNameFlag := flag.String("userName", "default", "clickhouse username")
 	passwordFlag := flag.String("password", "", "clickhouse password")
-	batchSize := flag.Int64("batch_size", 30000, "clickhouse password")
+	batchDuration := flag.Int("batch_duration", 5, "batch duration in minutes")
+	batchSize := flag.Int("batch_size", 30000, "clickhouse password")
+	startTimestamp := flag.Int64("start_ts", 0, "start timestamp in ns")
 	endTimestamp := flag.Int64("end_ts", 0, "end timestamp in ns")
 	sourceDbName := flag.String("source_db", "signoz_logs", "database name")
 	destDbName := flag.String("dest_db", "signoz_logs", "dest database name")
@@ -335,29 +328,29 @@ func main() {
 	destResourceTableName := flag.String("resource_table", "distributed_logs_v2_resource", "dest resource table name")
 
 	flag.Parse()
-	// zap.S().Debug(fmt.Sprintf("Params: %s %s %s", *hostFlag, *portFlag, *userNameFlag))
 
-	sourceConn, err := connect(*hostFlag, *portFlag, *userNameFlag, *passwordFlag)
-	if err != nil {
-		zap.S().Fatal("Error while connecting to clickhouse", zap.Error(err))
-	}
-
-	destConn, err := connect(*hostFlag, *portFlag, *userNameFlag, *passwordFlag)
+	sourceConn, err := connect(*hostFlag, *portFlag, *userNameFlag, *passwordFlag, *sourceDbName)
 	if err != nil {
 		zap.S().Fatal("Error while connecting to clickhouse", zap.Error(err))
 	}
 	defer sourceConn.Close()
+
+	destConn, err := connect("localhost", *portFlag, *userNameFlag, *passwordFlag, *destDbName)
+	if err != nil {
+		zap.S().Fatal("Error while connecting to clickhouse", zap.Error(err))
+	}
+
 	defer destConn.Close()
 
 	// get the total count of logs for that range of time.
-	count := getCountOfLogs(sourceConn, *endTimestamp, *sourceDbName, *sourceTableName)
+	count := getCountOfLogs(sourceConn, *endTimestamp, *sourceTableName)
 	if count == 0 {
 		zap.S().Info("No logs to migrate")
 		os.Exit(0)
 	}
 	zap.S().Info(fmt.Sprintf("Total count of logs: %d", count))
 
-	err = processBatchesOfLogs(sourceConn, destConn, *endTimestamp, *batchSize, *sourceDbName, *destDbName, *sourceTableName, *destTableName, *destResourceTableName)
+	err = processBatchesOfLogs(sourceConn, destConn, *startTimestamp, *endTimestamp, *batchDuration, *batchSize, *sourceTableName, *destTableName, *destResourceTableName)
 	if err != nil {
 		zap.S().Fatal("Error while migrating logs", zap.Error(err))
 		os.Exit(1)
@@ -365,7 +358,7 @@ func main() {
 	zap.S().Info(fmt.Sprintf("Completed migration in: %s", time.Since(start)))
 }
 
-const insertLogsSQLTemplateV2 = `INSERT INTO %s.%s (
+const insertLogsSQLTemplateV2 = `INSERT INTO %s (
 	ts_bucket_start,
 	resource_fingerprint,
 	timestamp,
