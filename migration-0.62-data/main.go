@@ -196,7 +196,8 @@ func fetchSpansBatch(conn clickhouse.Conn, tableName string, start, end int64) (
 }
 
 type Model struct {
-	Ref interface{} `json:"references"`
+	SpanID string      `json:"spanID"`
+	Ref    interface{} `json:"references"`
 }
 
 // it fetches logs from the sourceConn and writes to the destConn
@@ -237,7 +238,7 @@ func processBatchesOfTraces(sourceConn, destConn clickhouse.Conn, startTimestamp
 		}
 
 		// create a map of traceID to span
-		traceIDToLinks := map[string]string{}
+		spanIDToLinks := map[string]string{}
 		for _, span := range spans {
 			m := Model{}
 			err = json.Unmarshal([]byte(span.Model), &m)
@@ -248,7 +249,7 @@ func processBatchesOfTraces(sourceConn, destConn clickhouse.Conn, startTimestamp
 			if err != nil {
 				return fmt.Errorf("error while marshalling span model. Err=%v \n", err)
 			}
-			traceIDToLinks[span.TraceID] = string(ref)
+			spanIDToLinks[m.SpanID] = string(ref)
 		}
 
 		len := len(data)
@@ -264,7 +265,7 @@ func processBatchesOfTraces(sourceConn, destConn clickhouse.Conn, startTimestamp
 			batch := data[i:batchEnd]
 
 			// process the batch of data
-			err = processAndWriteBatch(destConn, batch, traceIDToLinks, destTableName, destResourceTableName)
+			err = processAndWriteBatch(destConn, batch, spanIDToLinks, destTableName, destResourceTableName)
 			if err != nil {
 				return err
 			}
@@ -281,7 +282,7 @@ func tsBucket(ts int64, bucketSize int64) int64 {
 }
 
 // writes a single batch to destConn
-func processAndWriteBatch(destConn clickhouse.Conn, traces []IndexV2, traceIDToLinks map[string]string, destTableName, destResourceTableName string) error {
+func processAndWriteBatch(destConn clickhouse.Conn, traces []IndexV2, spanIDToLinks map[string]string, destTableName, destResourceTableName string) error {
 	ctx := context.Background()
 
 	// go through each log and generate fingerprint for the batch
@@ -334,9 +335,9 @@ func processAndWriteBatch(destConn clickhouse.Conn, traces []IndexV2, traceIDToL
 			resourcesSeen[int64(lBucketStart)][resourceJson] = fp
 		}
 
-		links, exists := traceIDToLinks[trace.TraceID]
+		links, exists := spanIDToLinks[trace.SpanID]
 		if !exists {
-			zap.S().Error(fmt.Errorf("traceID not found in traceIDToLinks. TraceID=%s", trace.TraceID))
+			zap.S().Error(fmt.Errorf("spanID not found in spanIDToLinks. SpanID=%s", trace.SpanID))
 		}
 
 		err = insertTraceStmtV3.Append(
