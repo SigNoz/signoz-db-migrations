@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"sync"
 	"time"
@@ -115,7 +116,7 @@ func connect(host string, port string, userName string, password string, databas
 				Username: userName,
 				Password: password,
 			},
-			//Debug:           true,
+			Debug: false,
 		})
 	)
 	if err != nil {
@@ -131,15 +132,13 @@ func connect(host string, port string, userName string, password string, databas
 }
 
 func getCountOfTraces(conn clickhouse.Conn, startTimestamp, endTimestamp int64, tableName string) uint64 {
-
-	startTs := time.Unix(0, startTimestamp)
-	endTs := time.Unix(0, endTimestamp)
 	ctx := context.Background()
-	q := fmt.Sprintf("SELECT count(*) as count FROM %s WHERE timestamp> ? and timestamp <= ?", tableName)
+	// Directly use the nanosecond timestamps in the query
+	q := fmt.Sprintf("SELECT count(*) as count FROM %s WHERE timestamp > fromUnixTimestamp64Nano(?) AND timestamp <= fromUnixTimestamp64Nano(?)", tableName)
 	var count uint64
-	err := conn.QueryRow(ctx, q, startTs, endTs).Scan(&count)
+	err := conn.QueryRow(ctx, q, startTimestamp, endTimestamp).Scan(&count)
 	if err != nil {
-		zap.S().Error(fmt.Errorf("error while getting count of logs. Err=%v \n", err))
+		zap.S().Error(fmt.Errorf("error while getting count of traces. Err=%v \n", err))
 		return 0
 	}
 	return count
@@ -147,26 +146,23 @@ func getCountOfTraces(conn clickhouse.Conn, startTimestamp, endTimestamp int64, 
 
 // fetchBatch retrieves all data in the timerange
 func fetchIndexBatch(conn clickhouse.Conn, tableName string, start, end int64) ([]IndexV2, error) {
-	var logs []IndexV2
+	var traces []IndexV2
 	ctx := context.Background()
-
-	startTs := time.Unix(0, start)
-	endTs := time.Unix(0, end)
 
 	query := "SELECT " +
 		"timestamp, traceID, spanID, parentSpanID, name, kind, spanKind, durationNano, statusCode, statusMessage, statusCodeString, " +
 		"stringTagMap, numberTagMap, boolTagMap, resourceTagsMap, events, externalHttpMethod, externalHttpUrl, dbName, dbOperation, httpMethod, " +
-		"httpUrl, httpHost, hasError, responseStatusCode, isRemote from signoz_traces.%s " + "where timestamp > ? and timestamp <= ?"
+		"httpUrl, httpHost, hasError, responseStatusCode, isRemote from signoz_traces.%s " + "where timestamp > fromUnixTimestamp64Nano(?) and timestamp <= fromUnixTimestamp64Nano(?)"
 
 	query = fmt.Sprintf(query, tableName)
 
-	err := conn.Select(ctx, &logs, query, startTs, endTs)
+	err := conn.Select(ctx, &traces, query, start, end)
 	if err != nil {
-		zap.S().Error(fmt.Errorf("error while reading logs. Err=%v \n", err))
+		zap.S().Error(fmt.Errorf("error while reading traces. Err=%v \n", err))
 		return nil, err
 	}
 
-	return logs, nil
+	return traces, nil
 }
 
 type Span struct {
@@ -178,17 +174,14 @@ func fetchSpansBatch(conn clickhouse.Conn, tableName string, start, end int64) (
 	var spans []Span
 	ctx := context.Background()
 
-	startTs := time.Unix(0, start)
-	endTs := time.Unix(0, end)
-
 	query := "SELECT " +
-		"traceID, model from signoz_traces.%s " + "where timestamp > ? and timestamp <= ?"
+		"traceID, model from signoz_traces.%s " + "where timestamp > fromUnixTimestamp64Nano(?) and timestamp <= fromUnixTimestamp64Nano(?)"
 
 	query = fmt.Sprintf(query, tableName)
 
-	err := conn.Select(ctx, &spans, query, startTs, endTs)
+	err := conn.Select(ctx, &spans, query, start, end)
 	if err != nil {
-		zap.S().Error(fmt.Errorf("error while reading logs. Err=%v \n", err))
+		zap.S().Error(fmt.Errorf("error while reading spans. Err=%v \n", err))
 		return nil, err
 	}
 
@@ -200,7 +193,7 @@ type Model struct {
 	Ref    interface{} `json:"references"`
 }
 
-// it fetches logs from the sourceConn and writes to the destConn
+// it fetches traces from the sourceConn and writes to the destConn
 func processBatchesOfTraces(sourceConn, destConn clickhouse.Conn, startTimestamp, endTimestamp int64, batchDuration, batchSize int, sourceTableName, sourceSpansTableName, destTableName, destResourceTableName string) error {
 
 	// convert minutes to ns
@@ -337,7 +330,7 @@ func processAndWriteBatch(destConn clickhouse.Conn, traces []IndexV2, spanIDToLi
 
 		links, exists := spanIDToLinks[trace.SpanID]
 		if !exists {
-			zap.S().Error(fmt.Errorf("spanID not found in spanIDToLinks. SpanID=%s", trace.SpanID))
+			zap.S().Warn(fmt.Errorf("spanID not found in spanIDToLinks. SpanID=%s", trace.SpanID))
 		}
 
 		err = insertTraceStmtV3.Append(
@@ -375,7 +368,7 @@ func processAndWriteBatch(destConn clickhouse.Conn, traces []IndexV2, spanIDToLi
 			links,
 		)
 		if err != nil {
-			return fmt.Errorf("StatementAppendLogsV2:%w", err)
+			return fmt.Errorf("StatementAppendTracesV3:%w", err)
 		}
 
 	}
@@ -462,6 +455,7 @@ func main() {
 	sourceSpansTableName := flag.String("source_spans_table", "distributed_signoz_spans", "source spans table name")
 	destTableName := flag.String("dest_table", "distributed_signoz_index_v3", "dest table name")
 	destResourceTableName := flag.String("resource_table", "distributed_traces_v3_resource", "dest resource table name")
+	countDeltaAllowed := flag.Int("count_delta_allowed", 1000, "count delta allowed")
 
 	flag.Parse()
 
@@ -478,7 +472,7 @@ func main() {
 
 	defer destConn.Close()
 
-	// get the total count of logs for that range of time.
+	// get the total count of traces for that range of time.
 	count_index := getCountOfTraces(sourceConn, *startTimestamp, *endTimestamp, *sourceTableName)
 	if count_index == 0 {
 		zap.S().Info("No spans to migrate from index table")
@@ -491,15 +485,16 @@ func main() {
 		os.Exit(0)
 	}
 
-	if count_index != count_spans {
-		zap.S().Fatal("Count of spans in index table and spans table do not match")
-	}
+	zap.S().Info(fmt.Sprintf("Count of index table: %d", count_index))
+	zap.S().Info(fmt.Sprintf("Count of spans table: %d", count_spans))
 
-	zap.S().Info(fmt.Sprintf("Total count of logs: %d", count_index))
+	if math.Abs(float64(count_index-count_spans)) > float64(*countDeltaAllowed) {
+		zap.S().Fatal("Count delta between index table and spans table is more than allowed delta")
+	}
 
 	err = processBatchesOfTraces(sourceConn, destConn, *startTimestamp, *endTimestamp, *batchDuration, *batchSize, *sourceTableName, *sourceSpansTableName, *destTableName, *destResourceTableName)
 	if err != nil {
-		zap.S().Fatal("Error while migrating logs", zap.Error(err))
+		zap.S().Fatal("Error while migrating traces", zap.Error(err))
 		os.Exit(1)
 	}
 	zap.S().Info(fmt.Sprintf("Completed migration in: %s", time.Since(start)))
