@@ -452,7 +452,7 @@ func main() {
 	sourceDbName := flag.String("source_db", "signoz_traces", "database name")
 	destDbName := flag.String("dest_db", "signoz_traces", "dest database name")
 	sourceTableName := flag.String("source_table", "distributed_signoz_index_v2", "table name")
-	sourceSpansTableName := flag.String("source_spans_table", "distributed_signoz_spans", "source spans table name")
+	sourceSpansTableName := flag.String("source_spans_table", "distributed_tmp_signoz_spans", "source spans table name")
 	destTableName := flag.String("dest_table", "distributed_signoz_index_v3", "dest table name")
 	destResourceTableName := flag.String("resource_table", "distributed_traces_v3_resource", "dest resource table name")
 	countDeltaAllowed := flag.Int("count_delta_allowed", 1000, "count delta allowed")
