@@ -131,7 +131,7 @@ func connect(host string, port string, userName string, password string, databas
 	return conn, nil
 }
 
-func getCountOfTraces(conn clickhouse.Conn, startTimestamp, endTimestamp int64, tableName string) uint64 {
+func getCountOfTraces(conn clickhouse.Conn, startTimestamp, endTimestamp int64, tableName string) int64 {
 	ctx := context.Background()
 	// Directly use the nanosecond timestamps in the query
 	q := fmt.Sprintf("SELECT count(*) as count FROM %s WHERE timestamp > fromUnixTimestamp64Nano(?) AND timestamp <= fromUnixTimestamp64Nano(?)", tableName)
@@ -141,7 +141,7 @@ func getCountOfTraces(conn clickhouse.Conn, startTimestamp, endTimestamp int64, 
 		zap.S().Error(fmt.Errorf("error while getting count of traces. Err=%v \n", err))
 		return 0
 	}
-	return count
+	return int64(count)
 }
 
 // fetchBatch retrieves all data in the timerange
