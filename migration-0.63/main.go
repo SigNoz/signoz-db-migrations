@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"time"
@@ -166,19 +167,19 @@ func main() {
 	if err != nil {
 		zap.S().Error(err.Error())
 	}
-	fmt.Println(delOld, moveOld, oldColdStorageName)
+	zap.S().Info(fmt.Sprintf("old table values: delete:%v, move: %v, coldStorage: %s", delOld, moveOld, oldColdStorageName))
 
 	// get the ttl of the current table
 	delCurr, moveCurr, _, err := GetTTL(conn, "signoz_index_v3")
 	if err != nil {
 		zap.S().Error(err.Error())
 	}
-
-	fmt.Println(delCurr, moveCurr)
+	zap.S().Info(fmt.Sprintf("current table values: delete:%v, move: %v", delCurr, moveCurr))
 
 	// if current table cold storage is configured don't change it.
 	if moveCurr != -1 {
-		zap.S().Info("Since cold storage is already set not changing it")
+		zap.S().Info("since cold storage is already set not changing TTL values. Please use UI to configure TTL values")
+		os.Exit(0)
 	}
 
 	// if ttl is same don't change it
