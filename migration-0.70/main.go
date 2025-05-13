@@ -118,6 +118,10 @@ func main() {
 		"net_protocol_name":    "net.protocol.name",
 	}
 
+	notFoundMetricsMap := map[string]string{
+		"system_network_connections": "system.network.connections",
+	}
+
 	conn, err := getClickhouseConn()
 	if err != nil {
 		log.Fatalf("error connecting to ClickHouse: %v", err)
@@ -136,6 +140,14 @@ func main() {
 	log.Printf("metrics total: %v", len(metrics))
 
 	log.Printf("metrics missing: %v", missing)
+
+	for _, metric := range missing {
+		if _, ok := notFoundMetricsMap[metric]; !ok {
+			log.Fatalf("missing metricm, please add it to notFoundMetricsMap: %s", metric)
+		} else {
+			metrics[metric] = notFoundMetricsMap[metric]
+		}
+	}
 
 	const workerCount = 1
 
@@ -261,17 +273,11 @@ func main() {
 	for currTimeStamp <= lastTimeStamp {
 		if currTimeStamp+3600000 > lastTimeStamp {
 			log.Printf("Inserting the last batch with timestamp, %v", lastTimeStamp)
-			err := fetchAndInsertTimeSeriesV4(conn, currTimeStamp, lastTimeStamp, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
-			if err != nil {
-				log.Fatalf("error inserting last batch: %v", err)
-			}
+			fetchAndInsertTimeSeriesV4(conn, currTimeStamp, lastTimeStamp, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
 			currTimeStamp = currTimeStamp + 3600000
 		} else {
 			log.Printf("Inserting the batch with timestamp, %v", lastTimeStamp)
-			err := fetchAndInsertTimeSeriesV4(conn, currTimeStamp, currTimeStamp+3600000, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
-			if err != nil {
-				log.Fatalf("error inserting batch: %v", err)
-			}
+			fetchAndInsertTimeSeriesV4(conn, currTimeStamp, currTimeStamp+3600000, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
 			currTimeStamp = currTimeStamp + 3600000
 		}
 	}
