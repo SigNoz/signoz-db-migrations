@@ -1,4 +1,4 @@
-module awesomeProject3
+module migration-0.70
 
 go 1.24
 

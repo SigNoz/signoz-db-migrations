@@ -1,21 +1,20 @@
 package main
 
 import (
-	internal "awesomeProject3/internal"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"migration-0.70/helpers"
+	internal "migration-0.70/internal"
 
+	clickhouse "github.com/ClickHouse/clickhouse-go/v2"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"log"
 	"regexp"
 	"sync"
-	"time"
-
-	clickhouse "github.com/ClickHouse/clickhouse-go/v2"
-	"go.opentelemetry.io/collector/pdata/pcommon"
 )
 
 const (
@@ -66,15 +65,10 @@ type MetricsDetailsDto struct {
 }
 
 func getClickhouseConn() (clickhouse.Conn, error) {
-	options := &clickhouse.Options{
-		Addr:            []string{clickhouseHostWithPort},
-		Auth:            clickhouse.Auth{Database: clickhouseDataBase, Username: clickhouseUsername, Password: clickhousePassword},
-		DialTimeout:     5 * time.Second,
-		ConnMaxLifetime: 10 * time.Minute,
-		MaxOpenConns:    5,
-		MaxIdleConns:    2,
-	}
-	conn, err := clickhouse.Open(options)
+	cfg := helpers.LoadClickhouseConfig()
+	opts := helpers.NewClickHouseOptions(cfg)
+
+	conn, err := clickhouse.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ClickHouse connection: %w", err)
 	}
@@ -90,37 +84,27 @@ func getClickhouseConn() (clickhouse.Conn, error) {
 	return conn, nil
 }
 
+// struct for workers to get corresponding attributes
 type metricJob struct {
-	key  string
-	name string
+	normMetricName   string
+	unNormMetricName string
 }
 
 // result from checking one metric pair
 type metricResult struct {
-	key     string
-	name    string
-	attr1   []string
-	attr2   []string
-	attrMap map[string]string
-	err     error
+	normMetricName      string
+	unNormMetricName    string
+	normAttributes      []string
+	unNormAttributes    []string
+	normToUnNormAttrMap map[string]string
+	err                 error
 }
 
 func main() {
-	notFoundAttrMap := map[string]string{
-		"rpc_grpc_status_code": "rpc.grpc.status_code",
-		"rpc_system":           "rpc.system",
-		"rpc_method":           "rpc.method",
-		"net_peer_name":        "net.peer.name",
-		"net_protocol_version": "net.protocol.version",
-		"http_scheme":          "http.scheme",
-		"rpc_service":          "rpc.service",
-		"net_peer_port":        "net.peer.port",
-		"net_protocol_name":    "net.protocol.name",
-	}
+	defaults := make(map[string]string)
+	notFoundAttrMap := helpers.OverlayFromEnv(defaults, "NOT_FOUND_ATTR_MAP")
 
-	notFoundMetricsMap := map[string]string{
-		"system_network_connections": "system.network.connections",
-	}
+	notFoundMetricsMap := helpers.OverlayFromEnv(defaults, "NOT_FOUND_ATTR_MAP")
 
 	conn, err := getClickhouseConn()
 	if err != nil {
@@ -161,8 +145,8 @@ func main() {
 			defer wg.Done()
 			for job := range jobs {
 				// do the work
-				attrmap, attr1, attr2, err := checkAllAttributesOfTwoMetrics(conn, job.key, job.name)
-				results <- metricResult{job.key, job.name, attr1, attr2, attrmap, err}
+				attrmap, normAttrs, unNormAttrs, err := checkAllAttributesOfTwoMetrics(conn, job.normMetricName, job.unNormMetricName)
+				results <- metricResult{job.normMetricName, job.unNormMetricName, normAttrs, unNormAttrs, attrmap, err}
 			}
 		}()
 	}
@@ -188,32 +172,32 @@ func main() {
 	metricDetails := make(map[string]metricResult)
 	allAttributeMap := make(map[string]string)
 	for res := range results {
-		metricDetails[res.key] = res
+		metricDetails[res.normMetricName] = res
 		if res.err != nil {
-			log.Fatalf("error checking metric %s → %s: %v", res.key, res.name, res.err)
+			log.Fatalf("error checking metric %s → %s: %v", res.normMetricName, res.unNormMetricName, res.err)
 		} else {
 			//log.Printf("metrics name %s -> %s", res.key, res.name)
 		}
-		allAttributeMap = mergeMaps(allAttributeMap, res.attrMap)
+		allAttributeMap = mergeMaps(allAttributeMap, res.normToUnNormAttrMap)
 		switch {
-		case len(res.attr1) == 0 && len(res.attr2) == 0:
+		case len(res.normAttributes) == 0 && len(res.unNormAttributes) == 0:
 			mu.Lock()
-			validMetrics[res.key] = res.name
+			validMetrics[res.normMetricName] = res.unNormMetricName
 			//log.Printf("valid metric name: %s to %s", res.key, res.name)
 			mu.Unlock()
 
 		default:
 			// anything else is "non-valid"
 			mu.Lock()
-			nonValidMetrics[res.key] = res.name
+			nonValidMetrics[res.normMetricName] = res.unNormMetricName
 			mu.Unlock()
 
 			// still log the details for visibility
-			if len(res.attr1) > 0 {
-				log.Printf("extra attributes in underscore metric %s: %v", res.key, res.attr1)
+			if len(res.normAttributes) > 0 {
+				log.Printf("extra attributes in underscore metric %s: %v", res.normMetricName, res.normAttributes)
 			}
-			if len(res.attr2) > 0 {
-				log.Printf("extra attributes in dot metric %s: %v", res.name, res.attr2)
+			if len(res.unNormAttributes) > 0 {
+				log.Printf("extra attributes in dot metric %s: %v", res.unNormMetricName, res.unNormAttributes)
 			}
 		}
 	}
@@ -221,17 +205,17 @@ func main() {
 	notFound := make(map[string]struct{})
 
 	for _, metricDetail := range metricDetails {
-		if len(metricDetail.attr1) != 0 {
-			for _, attr := range metricDetail.attr1 {
+		if len(metricDetail.normAttributes) != 0 {
+			for _, attr := range metricDetail.normAttributes {
 				if _, ok := allAttributeMap[attr]; !ok {
 					if _, ok := notFoundAttrMap[attr]; !ok {
 						notFound[attr] = struct{}{}
 					} else {
 						allAttributeMap[attr] = notFoundAttrMap[attr]
-						metricDetail.attrMap[attr] = notFoundAttrMap[attr]
+						metricDetail.normToUnNormAttrMap[attr] = notFoundAttrMap[attr]
 					}
 				} else {
-					metricDetail.attrMap[attr] = allAttributeMap[attr]
+					metricDetail.normToUnNormAttrMap[attr] = allAttributeMap[attr]
 				}
 			}
 		}
@@ -273,11 +257,17 @@ func main() {
 	for currTimeStamp <= lastTimeStamp {
 		if currTimeStamp+3600000 > lastTimeStamp {
 			log.Printf("Inserting the last batch with timestamp, %v", lastTimeStamp)
-			fetchAndInsertTimeSeriesV4(conn, currTimeStamp, lastTimeStamp, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
+			err = fetchAndInsertTimeSeriesV4(conn, currTimeStamp, lastTimeStamp, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
+			if err != nil {
+				log.Fatalf("error inserting last batch with curr timestamp: %v and error: %v", currTimeStamp, err)
+			}
 			currTimeStamp = currTimeStamp + 3600000
 		} else {
 			log.Printf("Inserting the batch with timestamp, %v", lastTimeStamp)
-			fetchAndInsertTimeSeriesV4(conn, currTimeStamp, currTimeStamp+3600000, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
+			err = fetchAndInsertTimeSeriesV4(conn, currTimeStamp, currTimeStamp+3600000, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
+			if err != nil {
+				log.Fatalf("error inserting batch with curr timestamp: %v and error: %v", currTimeStamp, err)
+			}
 			currTimeStamp = currTimeStamp + 3600000
 		}
 	}
@@ -285,23 +275,11 @@ func main() {
 }
 
 func getAllDifferentMetricsAttributes(conn clickhouse.Conn) (map[string]struct{}, map[string]struct{}, map[string]struct{}, error) {
-	query := fmt.Sprintf(`WITH
-    (SELECT arraySort(groupUniqArray(arrayJoin(mapKeys(resource_attrs))))
-     FROM  signoz_metrics.distributed_time_series_v4
-     WHERE __normalized = false) AS resource_attr_keys,
-
-    (SELECT arraySort(groupUniqArray(arrayJoin(mapKeys(scope_attrs))))
-     FROM  signoz_metrics.distributed_time_series_v4
-     WHERE __normalized = false) AS scope_attr_keys,
-
-    (SELECT arraySort(groupUniqArray(arrayJoin(mapKeys(attrs))))
-     FROM  signoz_metrics.distributed_time_series_v4
-     WHERE __normalized = false) AS attr_keys
-
-SELECT
-    resource_attr_keys,
-    scope_attr_keys,
-    attr_keys;`)
+	query := fmt.Sprintf(`SELECT
+    arraySort(groupUniqArrayIf(attr_name, attr_type = 'resource')) AS resource_attrs,
+    arraySort(groupUniqArrayIf(attr_name, attr_type = 'scope'   )) AS scope_attrs,
+    arraySort(groupUniqArrayIf(attr_name, attr_type = 'point'   )) AS point_attrs
+FROM signoz_metrics.distributed_metadata`)
 	ctx := cappedCHContext(context.Background())
 	rows, err := conn.Query(ctx, query)
 	if err != nil {
@@ -420,7 +398,7 @@ func fetchAndInsertTimeSeriesV4(conn clickhouse.Conn, start, end int64, metricDe
 		pointAttrs := make(map[string]string)
 
 		for k, v := range labelMap {
-			clean := md.attrMap[k]
+			clean := md.normToUnNormAttrMap[k]
 
 			if _, ok := allResourceAttrs[clean]; ok {
 				resourceAttrs[clean] = v
@@ -450,7 +428,7 @@ func fetchAndInsertTimeSeriesV4(conn clickhouse.Conn, start, end int64, metricDe
 		var unNorm ts
 		unNorm.Env = norm.Env
 		unNorm.Temporality = norm.Temporality
-		unNorm.MetricName = md.name
+		unNorm.MetricName = md.unNormMetricName
 		unNorm.Description = norm.Description
 		unNorm.Unit = norm.Unit
 		unNorm.Type = norm.Type
@@ -558,7 +536,7 @@ func fetchAndInsertTimeSeriesV4(conn clickhouse.Conn, start, end int64, metricDe
 		md := metricDetails[normS.metricName]
 		unNormS.env = normS.env
 		unNormS.temporality = normS.temporality
-		unNormS.metricName = md.name
+		unNormS.metricName = md.unNormMetricName
 		unNormS.fingerprint = fingerprintMap[normS.fingerprint]
 		unNormS.unixMilli = normS.unixMilli
 		unNormS.value = normS.value
@@ -613,9 +591,9 @@ func attrsToPMap(src map[string]string) pcommon.Map {
 // toOtelTemporality maps DB string → pmetric.AggregationTemporality.
 func toOtelTemporality(dbVal string) pmetric.AggregationTemporality {
 	switch dbVal {
-	case "CUMULATIVE":
+	case "Cumulative":
 		return pmetric.AggregationTemporalityCumulative
-	case "DELTA":
+	case "Delta":
 		return pmetric.AggregationTemporalityDelta
 	default:
 		return pmetric.AggregationTemporalityUnspecified
@@ -643,7 +621,7 @@ func countOfNormalizedRowsTs(conn clickhouse.Conn, firstStamp int64, lastStamp i
 }
 
 func getFirstTimeStampforNormalizedData(conn clickhouse.Conn) (int64, error) {
-	query := fmt.Sprintf(`select unix_milli from %s.%s where __normalized = true order by unix_milli asc limit 1`, signozMetricDBName, signozTSTableNameV4)
+	query := fmt.Sprintf(`select min(unix_milli) from %s.%s where __normalized = true`, signozMetricDBName, signozTSTableNameV4)
 	ctx := cappedCHContext(context.Background())
 	rows, err := conn.Query(ctx, query)
 	if err != nil {
@@ -663,7 +641,7 @@ func getFirstTimeStampforNormalizedData(conn clickhouse.Conn) (int64, error) {
 }
 
 func getfirstTimeStampforNonNormalizedData(conn clickhouse.Conn) (int64, error) {
-	query := fmt.Sprintf(`select unix_milli from %s.%s where __normalized = false order by unix_milli asc limit 1`, signozMetricDBName, signozTSTableNameV4)
+	query := fmt.Sprintf(`select min(unix_milli) from %s.%s where __normalized = false`, signozMetricDBName, signozTSTableNameV4)
 	ctx := cappedCHContext(context.Background())
 	rows, err := conn.Query(ctx, query)
 	if err != nil {
@@ -759,68 +737,68 @@ var scrubRe = regexp.MustCompile(`[^0-9A-Za-z]+`)
 
 func checkAllAttributesOfTwoMetrics(
 	conn clickhouse.Conn,
-	metricTrue, metricFalse string,
+	metricNormTrue, metricNormFalse string,
 ) (
 // map each rawTrue key → all rawFalse keys with the same cleaned key
-	rawTrueToRawFalse map[string]string,
+	normAttrsToUnNormAttrs map[string]string,
 // original keys present only in metricTrue
-	onlyInTrueOrig []string,
+	keysPresentInNormMetric []string,
 // original keys present only in metricFalse
-	onlyInFalseOrig []string,
+	keysPresentInUnNormMetric []string,
 	err error,
 ) {
 	// 1) Fetch raw attribute lists
-	rawTrue, err := fetchMetaAttrs(conn, metricTrue, true)
+	rawNormTrueAttrs, err := fetchMetaAttrs(conn, metricNormTrue, true)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	rawFalse, err := fetchMetaAttrs(conn, metricFalse, false)
+	rawNormFalseAttrs, err := fetchMetaAttrs(conn, metricNormFalse, false)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
 	// 2) Build maps from cleaned key → original keys
-	trueMap := make(map[string]string, len(rawTrue))
-	for _, r := range rawTrue {
+	cleanKeysToOrigKeysNormAttrs := make(map[string]string, len(rawNormTrueAttrs))
+	for _, r := range rawNormTrueAttrs {
 		clean := scrubRe.ReplaceAllString(r, "")
-		trueMap[clean] = r
+		cleanKeysToOrigKeysNormAttrs[clean] = r
 	}
-	falseMap := make(map[string]string, len(rawFalse))
-	for _, r := range rawFalse {
+	cleanKeysToOrigKeysUnNormAttrs := make(map[string]string, len(rawNormFalseAttrs))
+	for _, r := range rawNormFalseAttrs {
 		clean := scrubRe.ReplaceAllString(r, "")
-		falseMap[clean] = r
+		cleanKeysToOrigKeysUnNormAttrs[clean] = r
 	}
 
 	// 4) Extract cleaned key sets
-	cleanTrue := make([]string, 0, len(trueMap))
-	for k := range trueMap {
-		cleanTrue = append(cleanTrue, k)
+	cleanNormTrueAttrs := make([]string, 0, len(cleanKeysToOrigKeysNormAttrs))
+	for k := range cleanKeysToOrigKeysNormAttrs {
+		cleanNormTrueAttrs = append(cleanNormTrueAttrs, k)
 	}
-	cleanFalse := make([]string, 0, len(falseMap))
-	for k := range falseMap {
-		cleanFalse = append(cleanFalse, k)
+	cleanNormFalseAttrs := make([]string, 0, len(cleanKeysToOrigKeysUnNormAttrs))
+	for k := range cleanKeysToOrigKeysUnNormAttrs {
+		cleanNormFalseAttrs = append(cleanNormFalseAttrs, k)
 	}
 
 	// 5) Compute diffs on the cleaned names
-	missingCleanInTrue := diff(cleanTrue, cleanFalse)  // in trueMap only
-	missingCleanInFalse := diff(cleanFalse, cleanTrue) // in falseMap only
+	missingCleanInNormTrueAttrs := diff(cleanNormTrueAttrs, cleanNormFalseAttrs)  // in trueMap only
+	missingCleanInNormFalseAttrs := diff(cleanNormFalseAttrs, cleanNormTrueAttrs) // in falseMap only
 
 	// 6) Map those back to original names
-	for _, cleanKey := range missingCleanInTrue {
-		onlyInTrueOrig = append(onlyInTrueOrig, trueMap[cleanKey])
+	for _, cleanKey := range missingCleanInNormTrueAttrs {
+		keysPresentInNormMetric = append(keysPresentInNormMetric, cleanKeysToOrigKeysNormAttrs[cleanKey])
 	}
-	for _, cleanKey := range missingCleanInFalse {
-		onlyInFalseOrig = append(onlyInFalseOrig, falseMap[cleanKey])
+	for _, cleanKey := range missingCleanInNormFalseAttrs {
+		keysPresentInUnNormMetric = append(keysPresentInUnNormMetric, cleanKeysToOrigKeysUnNormAttrs[cleanKey])
 	}
 
-	rawTrueToRawFalse = make(map[string]string, len(trueMap))
-	for clean, rTrue := range trueMap {
-		if rFalse, ok := falseMap[clean]; ok {
-			rawTrueToRawFalse[rTrue] = rFalse
+	normAttrsToUnNormAttrs = make(map[string]string, len(cleanKeysToOrigKeysNormAttrs))
+	for clean, rTrue := range cleanKeysToOrigKeysNormAttrs {
+		if rFalse, ok := cleanKeysToOrigKeysUnNormAttrs[clean]; ok {
+			normAttrsToUnNormAttrs[rTrue] = rFalse
 		}
 	}
 
-	return rawTrueToRawFalse, onlyInTrueOrig, onlyInFalseOrig, nil
+	return normAttrsToUnNormAttrs, keysPresentInNormMetric, keysPresentInUnNormMetric, nil
 }
 
 func fetchMetaAttrs(conn clickhouse.Conn, metricName string, normalized bool) ([]string, error) {
