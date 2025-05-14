@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"golang.org/x/sync/errgroup"
 	"migration-0.70/helpers"
 	internal "migration-0.70/internal"
 
@@ -51,23 +53,10 @@ type metricSample struct {
 	flags       uint32                         `ch:"flags"`
 }
 
-// configs
-const (
-	clickhouseHostWithPort = "127.0.0.1:9001"
-	clickhouseDataBase     = "default"
-	clickhouseUsername     = "default"
-	clickhousePassword     = ""
-)
-
-type MetricsDetailsDto struct {
-	MetricName string
-	Normalized bool
-}
-
-func getClickhouseConn() (clickhouse.Conn, error) {
+func getClickhouseConn(pool int) (clickhouse.Conn, error) {
 	cfg := helpers.LoadClickhouseConfig()
 	opts := helpers.NewClickHouseOptions(cfg)
-
+	opts.MaxOpenConns = pool
 	conn, err := clickhouse.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ClickHouse connection: %w", err)
@@ -101,12 +90,25 @@ type metricResult struct {
 }
 
 func main() {
-	defaults := make(map[string]string)
-	notFoundAttrMap := helpers.OverlayFromEnv(defaults, "NOT_FOUND_ATTR_MAP")
+	var (
+		workers      = flag.Int("workers", helpers.EnvOrInt("MIGRATE_WORKERS", 4), "concurrent hour-windows to process")
+		maxOpenConns = flag.Int("max-open-conns", helpers.EnvOrInt("MIGRATE_MAX_OPEN_CONNS", 16), "ClickHouse connection pool size")
+	)
+	flag.Parse()
 
-	notFoundMetricsMap := helpers.OverlayFromEnv(defaults, "NOT_FOUND_ATTR_MAP")
+	defaultsAttrs := map[string]string{
+		"quantile": "quantile",
+	}
+	defaultsMerics := map[string]string{
+		"certmanager_http_acme_client_request_duration_seconds":     "certmanager_http_acme_client_request_duration_seconds",
+		"redis_latency_percentiles_usec":                            "redis_latency_percentiles_usec",
+		"go_gc_duration_seconds":                                    "go_gc_duration_seconds",
+		"nginx_ingress_controller_ingress_upstream_latency_seconds": "nginx_ingress_controller_ingress_upstream_latency_seconds",
+	}
+	notFoundAttrMap := helpers.OverlayFromEnv(defaultsAttrs, "NOT_FOUND_ATTR_MAP")
+	notFoundMetricsMap := helpers.OverlayFromEnv(defaultsMerics, "NOT_FOUND_METRICS_MAP")
 
-	conn, err := getClickhouseConn()
+	conn, err := getClickhouseConn(*maxOpenConns)
 	if err != nil {
 		log.Fatalf("error connecting to ClickHouse: %v", err)
 	}
@@ -127,13 +129,67 @@ func main() {
 
 	for _, metric := range missing {
 		if _, ok := notFoundMetricsMap[metric]; !ok {
-			log.Fatalf("missing metricm, please add it to notFoundMetricsMap: %s", metric)
+			log.Fatalf("missing metrics, please add it to NOT_FOUND_METRIC_MAP: %s", metric)
 		} else {
 			metrics[metric] = notFoundMetricsMap[metric]
 		}
 	}
 
-	const workerCount = 1
+	metricDetails, _, err := buildMetricDetails(conn, metrics, notFoundAttrMap)
+	if err != nil {
+		log.Fatalf("error building metric details: %v", err)
+	}
+
+	//lets start insertion
+
+	//check from where insertion needs to be start
+	firstTimesStamp, err := getFirstTimeStampforNormalizedData(conn)
+	if err != nil {
+		log.Fatalf("error getting first timestamp: %v", err)
+	}
+	lastTimeStamp, err := getfirstTimeStampforNonNormalizedData(conn)
+	if err != nil {
+		log.Fatalf("error getting last timestamp: %v", err)
+	}
+	//how many rows to be inserted
+	log.Printf("migrating window [%d … %d) (%.1f h total)",
+		firstTimesStamp, lastTimeStamp, float64(lastTimeStamp-firstTimesStamp)/3_600_000)
+
+	tsCount, err := countOfNormalizedRowsTs(conn, firstTimesStamp, lastTimeStamp)
+	if err != nil {
+		log.Fatalf("error counting rows: %v", err)
+	}
+	log.Printf("total ts rows: %d", tsCount)
+	//first fetch last an hour data
+	allResourceAttrs, allScopeAttrs, allPointAttr, err := getAllDifferentMetricsAttributes(conn)
+	if err != nil {
+		log.Fatalf("error getting all attributes: %v", err)
+	}
+
+	g, errGroupCtx := errgroup.WithContext(context.Background())
+	sem := make(chan struct{}, *workers)
+
+	for t := firstTimesStamp; t < lastTimeStamp; t += 3_600_000 {
+		start, end := t, min(t+3_600_000, lastTimeStamp)
+
+		sem <- struct{}{}
+		st, en := start, end
+		g.Go(func() error {
+			defer func() { <-sem }()
+			return fetchAndInsertTimeSeriesV4(errGroupCtx, conn, st, en, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		log.Fatalf("error migration failed: %v", err)
+	}
+	log.Printf("migration finished")
+
+}
+
+func buildMetricDetails(conn clickhouse.Conn, metrics map[string]string, notFoundAttrMap map[string]string) (map[string]metricResult, map[string]string, error) {
+
+	var workerCount = 4
 
 	jobs := make(chan metricJob, len(metrics))
 	results := make(chan metricResult, len(metrics))
@@ -176,7 +232,7 @@ func main() {
 		if res.err != nil {
 			log.Fatalf("error checking metric %s → %s: %v", res.normMetricName, res.unNormMetricName, res.err)
 		} else {
-			//log.Printf("metrics name %s -> %s", res.key, res.name)
+			//log.Printf("metrics name %s -> %s", res.key, res.name) // uncomment this line to check for valid metrics.
 		}
 		allAttributeMap = mergeMaps(allAttributeMap, res.normToUnNormAttrMap)
 		switch {
@@ -222,56 +278,14 @@ func main() {
 	}
 
 	if len(notFound) > 0 {
-		log.Fatalf("metrics not found in any metrics: %v", notFound)
+		return nil, nil, fmt.Errorf("attributes not found in any metrics: %v", notFound)
 	}
 
 	//for not found metric
 
 	log.Printf("metrics ready for conversion: %+v", validMetrics)
 
-	//lets start insertion
-
-	//check from where insertion needs to be start
-	firstTimesStamp, err := getFirstTimeStampforNormalizedData(conn)
-	if err != nil {
-		log.Fatalf("error getting first timestamp: %v", err)
-	}
-	lastTimeStamp, err := getfirstTimeStampforNonNormalizedData(conn)
-	if err != nil {
-		log.Fatalf("error getting last timestamp: %v", err)
-	}
-	//how many rows to be inserted
-
-	tsCount, err := countOfNormalizedRowsTs(conn, firstTimesStamp, lastTimeStamp)
-	if err != nil {
-		log.Fatalf("error counting rows: %v", err)
-	}
-	log.Printf("total ts rows: %d", tsCount)
-	//first fetch last an hour data
-	allResourceAttrs, allScopeAttrs, allPointAttr, err := getAllDifferentMetricsAttributes(conn)
-	if err != nil {
-		log.Fatalf("error getting all attributes: %v", err)
-	}
-
-	currTimeStamp := firstTimesStamp
-	for currTimeStamp <= lastTimeStamp {
-		if currTimeStamp+3600000 > lastTimeStamp {
-			log.Printf("Inserting the last batch with timestamp, %v", lastTimeStamp)
-			err = fetchAndInsertTimeSeriesV4(conn, currTimeStamp, lastTimeStamp, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
-			if err != nil {
-				log.Fatalf("error inserting last batch with curr timestamp: %v and error: %v", currTimeStamp, err)
-			}
-			currTimeStamp = currTimeStamp + 3600000
-		} else {
-			log.Printf("Inserting the batch with timestamp, %v", lastTimeStamp)
-			err = fetchAndInsertTimeSeriesV4(conn, currTimeStamp, currTimeStamp+3600000, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
-			if err != nil {
-				log.Fatalf("error inserting batch with curr timestamp: %v and error: %v", currTimeStamp, err)
-			}
-			currTimeStamp = currTimeStamp + 3600000
-		}
-	}
-
+	return metricDetails, allAttributeMap, nil
 }
 
 func getAllDifferentMetricsAttributes(conn clickhouse.Conn) (map[string]struct{}, map[string]struct{}, map[string]struct{}, error) {
@@ -310,10 +324,10 @@ FROM signoz_metrics.distributed_metadata`)
 	return toSet(resSlice), toSet(scopeSlice), toSet(attrSlice), nil
 }
 
-func fetchAndInsertTimeSeriesV4(conn clickhouse.Conn, start, end int64, metricDetails map[string]metricResult, allResourceAttrs, allScopeAttrs, allPointAttrs map[string]struct{}) error {
+func fetchAndInsertTimeSeriesV4(ctx context.Context, conn clickhouse.Conn, start, end int64, metricDetails map[string]metricResult, allResourceAttrs, allScopeAttrs, allPointAttrs map[string]struct{}) error {
 	const maxRowsPerBatch = 1_000_000
 
-	ctx := cappedCHContext(context.Background())
+	ctx = cappedCHContext(ctx)
 
 	queryTS := fmt.Sprintf(`
 		SELECT
@@ -573,7 +587,7 @@ func fetchAndInsertTimeSeriesV4(conn clickhouse.Conn, start, end int64, metricDe
 			return fmt.Errorf("final samples flush: %w", err)
 		}
 	}
-
+	log.Printf("migration success for windows start: %v, and end: %v", start, end)
 	return nil
 }
 

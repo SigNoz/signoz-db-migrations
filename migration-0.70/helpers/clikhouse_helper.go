@@ -21,7 +21,7 @@ func envOr(key, def string) string {
 }
 
 // envOrInt converts env[key] to int or falls back to def.
-func envOrInt(key string, def int) int {
+func EnvOrInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
@@ -88,12 +88,12 @@ func LoadClickhouseConfig() *ChConfig {
 	)
 	flag.IntVar(&cfg.maxOpenConns,
 		"ch.max-open-conns",
-		envOrInt("CH_MAX_OPEN_CONNS", 5),
+		EnvOrInt("CH_MAX_OPEN_CONNS", 5),
 		"Max open conns (env CH_MAX_OPEN_CONNS)",
 	)
 	flag.IntVar(&cfg.maxIdleConns,
 		"ch.max-idle-conns",
-		envOrInt("CH_MAX_IDLE_CONNS", 2),
+		EnvOrInt("CH_MAX_IDLE_CONNS", 2),
 		"Max idle conns (env CH_MAX_IDLE_CONNS)",
 	)
 
