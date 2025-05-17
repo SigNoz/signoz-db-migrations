@@ -169,8 +169,8 @@ func main() {
 	g, errGroupCtx := errgroup.WithContext(context.Background())
 	sem := make(chan struct{}, *workers)
 
-	for t := firstTimesStamp; t < lastTimeStamp; t += 3_600_000 {
-		start, end := t, min(t+3_600_000, lastTimeStamp)
+	for t := firstTimesStamp; t < lastTimeStamp; t += 3600 {
+		start, end := t, min(t+3600, lastTimeStamp)
 
 		sem <- struct{}{}
 		st, en := start, end
@@ -504,7 +504,7 @@ func fetchAndInsertTimeSeriesV4(ctx context.Context, conn clickhouse.Conn, start
 	   2) READ & WRITE THE SAMPLE ROWS (same batching pattern)
 	   ------------------------------------------------------------------ */
 	if len(fingerprintMap) == 0 {
-		return nil // nothing to do
+		return nil
 	}
 
 	fps := make([]uint64, 0, len(fingerprintMap))
@@ -513,14 +513,25 @@ func fetchAndInsertTimeSeriesV4(ctx context.Context, conn clickhouse.Conn, start
 	}
 
 	querySamples := fmt.Sprintf(`
-		SELECT
-			env, temporality, metric_name, fingerprint,
-			unix_milli, value, flags
-		FROM %s.%s
-		WHERE fingerprint IN (?) and unix_milli >= ? and unix_milli < ?`,
-		signozMetricDBName, signozSampleTableName)
+		    SELECT
+        env,
+        temporality,
+        metric_name,
+        fingerprint,
+        unix_milli,
+        value,
+        flags
+    FROM %s.%s
+    WHERE fingerprint IN GLOBAl (
+        SELECT fingerprint
+        FROM %s.%s
+        WHERE __normalized = true
+          AND unix_milli >= ? AND unix_milli < ?
+    )
+      AND unix_milli >= ? AND unix_milli < ?`,
+		signozMetricDBName, signozSampleTableName, signozMetricDBName, signozTSTableNameV4)
 
-	rowsSamples, err := conn.Query(ctx, querySamples, fps, start, end)
+	rowsSamples, err := conn.Query(ctx, querySamples, start, end, start, end)
 	if err != nil {
 		return fmt.Errorf("samples query: %w", err)
 	}
