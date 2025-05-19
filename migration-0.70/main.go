@@ -2,19 +2,24 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"golang.org/x/sync/errgroup"
-	"migration-0.70/helpers"
-	internal "migration-0.70/internal"
-
 	clickhouse "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	_ "github.com/mattn/go-sqlite3"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"golang.org/x/sync/errgroup"
+	"io"
 	"log"
+	"migration-0.70/helpers"
+	internal "migration-0.70/internal"
+	"os"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"sync"
 )
@@ -135,14 +140,10 @@ func main() {
 		}
 	}
 
-	metricDetails, _, err := buildMetricDetails(conn, metrics, notFoundAttrMap)
+	metricDetails, attrMap, err := buildMetricDetails(conn, metrics, notFoundAttrMap)
 	if err != nil {
 		log.Fatalf("error building metric details: %v", err)
 	}
-
-	//lets start insertion
-
-	//check from where insertion needs to be start
 	firstTimesStamp, err := getFirstTimeStampforNormalizedData(conn)
 	if err != nil {
 		log.Fatalf("error getting first timestamp: %v", err)
@@ -151,39 +152,63 @@ func main() {
 	if err != nil {
 		log.Fatalf("error getting last timestamp: %v", err)
 	}
-	//how many rows to be inserted
-	log.Printf("migrating window [%d … %d) (%.1f h total)",
-		firstTimesStamp, lastTimeStamp, float64(lastTimeStamp-firstTimesStamp)/3_600_000)
 
-	tsCount, err := countOfNormalizedRowsTs(conn, firstTimesStamp, lastTimeStamp)
+	if firstTimesStamp < lastTimeStamp {
+		//how many rows to be inserted
+		log.Printf("migrating window [%d … %d) (%.1f h total)",
+			firstTimesStamp, lastTimeStamp, float64(lastTimeStamp-firstTimesStamp)/3_600_000)
+
+		tsCount, err := countOfNormalizedRowsTs(conn, firstTimesStamp, lastTimeStamp)
+		if err != nil {
+			log.Fatalf("error counting rows: %v", err)
+		}
+		log.Printf("total ts rows: %d", tsCount)
+		//first fetch last an hour data
+		allResourceAttrs, allScopeAttrs, allPointAttr, err := getAllDifferentMetricsAttributes(conn)
+		if err != nil {
+			log.Fatalf("error getting all attributes: %v", err)
+		}
+
+		g, errGroupCtx := errgroup.WithContext(context.Background())
+		sem := make(chan struct{}, *workers)
+
+		for t := firstTimesStamp; t < lastTimeStamp; t += 3600 {
+			start, end := t, min(t+3600, lastTimeStamp)
+
+			sem <- struct{}{}
+			st, en := start, end
+			g.Go(func() error {
+				defer func() { <-sem }()
+				return fetchAndInsertTimeSeriesV4(errGroupCtx, conn, st, en, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
+			})
+		}
+
+		if err := g.Wait(); err != nil {
+			log.Fatalf("error migration failed: %v", err)
+		}
+		log.Printf("migration finished")
+	}
+
+	// ALerts and dashboards migrations
+
+	origDB := "signoz.db"
+	copyDB := "dashboards_copy.db"
+
+	// 1) copy the DB
+	if err := copyFile(origDB, copyDB); err != nil {
+		log.Fatalf("failed to copy DB: %v", err)
+	}
+	fmt.Println("✅ copied DB to", copyDB)
+
+	err = migrateDashboards(metricDetails, attrMap, copyDB)
 	if err != nil {
-		log.Fatalf("error counting rows: %v", err)
+		log.Fatalf("error migrating dashboards: %v", err)
 	}
-	log.Printf("total ts rows: %d", tsCount)
-	//first fetch last an hour data
-	allResourceAttrs, allScopeAttrs, allPointAttr, err := getAllDifferentMetricsAttributes(conn)
+
+	err = migrateRules(metricDetails, attrMap, copyDB)
 	if err != nil {
-		log.Fatalf("error getting all attributes: %v", err)
+		log.Fatalf("error migrating rules: %v", err)
 	}
-
-	g, errGroupCtx := errgroup.WithContext(context.Background())
-	sem := make(chan struct{}, *workers)
-
-	for t := firstTimesStamp; t < lastTimeStamp; t += 3600 {
-		start, end := t, min(t+3600, lastTimeStamp)
-
-		sem <- struct{}{}
-		st, en := start, end
-		g.Go(func() error {
-			defer func() { <-sem }()
-			return fetchAndInsertTimeSeriesV4(errGroupCtx, conn, st, en, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
-		})
-	}
-
-	if err := g.Wait(); err != nil {
-		log.Fatalf("error migration failed: %v", err)
-	}
-	log.Printf("migration finished")
 
 }
 
@@ -892,4 +917,280 @@ func mergeMaps(a, b map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func migrateDashboards(
+	metricMap map[string]metricResult,
+	attrMap map[string]string,
+	copyDB string,
+) error {
+
+	// 2) open the copy
+	db, err := sql.Open("sqlite3", copyDB)
+	if err != nil {
+		return fmt.Errorf("failed to open copy: %v", err)
+	}
+	defer db.Close()
+
+	// Prepare in-string replacers once, for both metrics & attrs
+	replacers := buildReplacers(metricMap, attrMap)
+
+	// 3) select each dashboard row
+	rows, err := db.Query(`SELECT id, data FROM dashboards`)
+	if err != nil {
+		return fmt.Errorf("query failed: %v", err)
+	}
+	defer rows.Close()
+
+	type row struct {
+		id   interface{}
+		data []byte
+	}
+	var toUpdate []row
+
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.data); err != nil {
+			return fmt.Errorf("scan failed: %v", err)
+		}
+
+		// parse JSON
+		var payload interface{}
+		if err := json.Unmarshal(r.data, &payload); err != nil {
+			log.Printf("⚠️  skipping row %v: invalid JSON", r.id)
+			continue
+		}
+
+		// traverse & replace (pass in replacers)
+		updated := traverse(payload, metricMap, attrMap, replacers)
+
+		// marshal back
+		newBytes, err := json.Marshal(updated)
+		if err != nil {
+			return fmt.Errorf("re-marshal failed for row %v: %v", r.id, err)
+		}
+
+		// only update if changed
+		if !jsonEqual(r.data, newBytes) {
+			toUpdate = append(toUpdate, row{id: r.id, data: newBytes})
+		}
+	}
+
+	// apply updates in a transaction
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx failed: %v", err)
+	}
+	stmt, err := tx.Prepare(`UPDATE dashboards SET data = ? WHERE id = ?`)
+	if err != nil {
+		return fmt.Errorf("prepare failed: %v", err)
+	}
+	defer stmt.Close()
+
+	for _, r := range toUpdate {
+		if _, err := stmt.Exec(r.data, r.id); err != nil {
+			return fmt.Errorf("update failed for %v: %v", r.id, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit failed: %v", err)
+	}
+
+	fmt.Printf("✅ updated %d rows in %s\n", len(toUpdate), filepath.Base(copyDB))
+	return nil
+}
+
+type replacer struct {
+	re  *regexp.Regexp
+	dot string
+}
+
+func buildReplacers(
+	metricMap map[string]metricResult,
+	attrMap map[string]string,
+) []struct {
+	re  *regexp.Regexp
+	dot string
+} {
+	var reps []struct {
+		re  *regexp.Regexp
+		dot string
+	}
+	for under, m := range metricMap {
+		patt := `\b` + regexp.QuoteMeta(under) + `\b`
+		reps = append(reps, struct {
+			re  *regexp.Regexp
+			dot string
+		}{re: regexp.MustCompile(patt), dot: m.unNormMetricName})
+	}
+	for under, dot := range attrMap {
+		patt := `\b` + regexp.QuoteMeta(under) + `\b`
+		reps = append(reps, struct {
+			re  *regexp.Regexp
+			dot string
+		}{re: regexp.MustCompile(patt), dot: dot})
+	}
+	return reps
+}
+
+func traverse(
+	v interface{},
+	metricMap map[string]metricResult,
+	attrMap map[string]string,
+	replacers []struct {
+	re  *regexp.Regexp
+	dot string
+},
+) interface{} {
+	switch x := v.(type) {
+	case string:
+		// 1) exact match on whole string
+		if m, ok := metricMap[x]; ok {
+			return m.unNormMetricName
+		}
+		if dot, ok := attrMap[x]; ok {
+			return dot
+		}
+		// 2) in-string replacement
+		s := x
+		for _, r := range replacers {
+			s = r.re.ReplaceAllString(s, r.dot)
+		}
+		return s
+
+	case []interface{}:
+		for i, e := range x {
+			x[i] = traverse(e, metricMap, attrMap, replacers)
+		}
+		return x
+
+	case map[string]interface{}:
+		newMap := make(map[string]interface{}, len(x))
+		for k, e := range x {
+			newKey := k
+			if m, ok := metricMap[k]; ok {
+				newKey = m.unNormMetricName
+			} else if dot, ok := attrMap[k]; ok {
+				newKey = dot
+			}
+			newMap[newKey] = traverse(e, metricMap, attrMap, replacers)
+		}
+		return newMap
+
+	default:
+		return v
+	}
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := out.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+	if _, err = io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
+}
+
+func jsonEqual(a, b []byte) bool {
+	var oa, ob interface{}
+	if err := json.Unmarshal(a, &oa); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(b, &ob); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(oa, ob)
+}
+
+func migrateRules(
+	metricMap map[string]metricResult,
+	attrMap map[string]string,
+	dbPath string,
+) error {
+
+	// open DB
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open DB %s: %w", dbPath, err)
+	}
+	defer db.Close()
+
+	// build in-string replacers once
+	replacers := buildReplacers(metricMap, attrMap)
+
+	// select id + data
+	rows, err := db.Query(`SELECT id, data FROM rule`)
+	if err != nil {
+		return fmt.Errorf("query failed: %w", err)
+	}
+	defer rows.Close()
+
+	type ruleRow struct {
+		id   interface{}
+		data []byte
+	}
+	var toUpdate []ruleRow
+
+	for rows.Next() {
+		var r ruleRow
+		if err := rows.Scan(&r.id, &r.data); err != nil {
+			return fmt.Errorf("scan failed: %w", err)
+		}
+
+		// parse JSON
+		var payload interface{}
+		if err := json.Unmarshal(r.data, &payload); err != nil {
+			log.Printf("⚠️ skipping rule %v: invalid JSON", r.id)
+			continue
+		}
+
+		// normalize underscore→dot
+		updated := traverse(payload, metricMap, attrMap, replacers)
+
+		// marshal back
+		newBytes, err := json.Marshal(updated)
+		if err != nil {
+			return fmt.Errorf("re-marshal failed for rule %v: %w", r.id, err)
+		}
+
+		// compare
+		if !jsonEqual(r.data, newBytes) {
+			toUpdate = append(toUpdate, ruleRow{id: r.id, data: newBytes})
+		}
+	}
+
+	// apply updates
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx failed: %w", err)
+	}
+	stmt, err := tx.Prepare(`UPDATE rule SET data = ? WHERE id = ?`)
+	if err != nil {
+		return fmt.Errorf("prepare failed: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, r := range toUpdate {
+		if _, err := stmt.Exec(r.data, r.id); err != nil {
+			return fmt.Errorf("update failed for rule %v: %w", r.id, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit failed: %w", err)
+	}
+
+	fmt.Printf("✅ updated %d rules in %s\n", len(toUpdate), dbPath)
+	return nil
 }

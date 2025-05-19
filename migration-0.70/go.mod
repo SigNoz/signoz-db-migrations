@@ -5,6 +5,7 @@ go 1.24
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.34.0
 	github.com/SigNoz/signoz-otel-collector v0.111.41
+	github.com/mattn/go-sqlite3 v1.14.28
 	go.opentelemetry.io/collector/component v0.111.0
 	go.opentelemetry.io/collector/pdata v1.31.0
 	golang.org/x/sync v0.13.0
