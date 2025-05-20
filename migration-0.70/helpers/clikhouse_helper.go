@@ -13,7 +13,7 @@ import (
 // ----- helpers -----
 
 // envOr returns env[key] if set, otherwise def.
-func envOr(key, def string) string {
+func EnvOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
@@ -58,22 +58,22 @@ func LoadClickhouseConfig() *ChConfig {
 
 	flag.StringVar(&cfg.addr,
 		"ch.addr",
-		envOr("CH_ADDR", "127.0.0.1:9001"),
+		EnvOr("CH_ADDR", "127.0.0.1:9001"),
 		"ClickHouse host:port (env CH_ADDR)",
 	)
 	flag.StringVar(&cfg.database,
 		"ch.db",
-		envOr("CH_DATABASE", "default"),
+		EnvOr("CH_DATABASE", "default"),
 		"ClickHouse database (env CH_DATABASE)",
 	)
 	flag.StringVar(&cfg.username,
 		"ch.user",
-		envOr("CH_USER", "default"),
+		EnvOr("CH_USER", "default"),
 		"ClickHouse username (env CH_USER)",
 	)
 	flag.StringVar(&cfg.password,
 		"ch.pass",
-		envOr("CH_PASS", ""),
+		EnvOr("CH_PASS", ""),
 		"ClickHouse password (env CH_PASS)",
 	)
 	flag.DurationVar(&cfg.dialTimeout,

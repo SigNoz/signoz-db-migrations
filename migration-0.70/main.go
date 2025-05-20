@@ -1,27 +1,30 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"strings"
+	"sync"
+
 	clickhouse "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	_ "github.com/mattn/go-sqlite3"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"golang.org/x/sync/errgroup"
-	"io"
-	"log"
 	"migration-0.70/helpers"
 	internal "migration-0.70/internal"
-	"os"
-	"path/filepath"
-	"reflect"
-	"regexp"
-	"sync"
 )
 
 const (
@@ -98,6 +101,7 @@ func main() {
 	var (
 		workers      = flag.Int("workers", helpers.EnvOrInt("MIGRATE_WORKERS", 4), "concurrent hour-windows to process")
 		maxOpenConns = flag.Int("max-open-conns", helpers.EnvOrInt("MIGRATE_MAX_OPEN_CONNS", 16), "ClickHouse connection pool size")
+		dbPath       = flag.String("db-path", helpers.EnvOr("SQL_DB_PATH", "./signoz.db"), "database path")
 	)
 	flag.Parse()
 
@@ -153,61 +157,91 @@ func main() {
 		log.Fatalf("error getting last timestamp: %v", err)
 	}
 
+	reader := bufio.NewReader(os.Stdin)
+
 	if firstTimesStamp < lastTimeStamp {
-		//how many rows to be inserted
-		log.Printf("migrating window [%d … %d) (%.1f h total)",
-			firstTimesStamp, lastTimeStamp, float64(lastTimeStamp-firstTimesStamp)/3_600_000)
-
-		tsCount, err := countOfNormalizedRowsTs(conn, firstTimesStamp, lastTimeStamp)
+		fmt.Print("Do you want to migrate old high retention data, if yes enter yes: ")
+		input, err := reader.ReadString('\n')
 		if err != nil {
-			log.Fatalf("error counting rows: %v", err)
+			fmt.Fprintln(os.Stderr, "error reading input:", err)
+			return
 		}
-		log.Printf("total ts rows: %d", tsCount)
-		//first fetch last an hour data
-		allResourceAttrs, allScopeAttrs, allPointAttr, err := getAllDifferentMetricsAttributes(conn)
-		if err != nil {
-			log.Fatalf("error getting all attributes: %v", err)
+		cmd := strings.TrimSpace(input)
+		if cmd == "yes" {
+			//how many rows to be inserted
+			log.Printf("migrating window [%d … %d) (%.1f h total)",
+				firstTimesStamp, lastTimeStamp, float64(lastTimeStamp-firstTimesStamp)/3_600_000)
+
+			tsCount, err := countOfNormalizedRowsTs(conn, firstTimesStamp, lastTimeStamp)
+			if err != nil {
+				log.Fatalf("error counting rows: %v", err)
+			}
+			log.Printf("total ts rows: %d", tsCount)
+			//first fetch last an hour data
+			allResourceAttrs, allScopeAttrs, allPointAttr, err := getAllDifferentMetricsAttributes(conn)
+			if err != nil {
+				log.Fatalf("error getting all attributes: %v", err)
+			}
+
+			g, errGroupCtx := errgroup.WithContext(context.Background())
+			sem := make(chan struct{}, *workers)
+
+			for t := firstTimesStamp; t < lastTimeStamp; t += 3600 {
+				start, end := t, min(t+3600, lastTimeStamp)
+
+				sem <- struct{}{}
+				st, en := start, end
+				g.Go(func() error {
+					defer func() { <-sem }()
+					return fetchAndInsertTimeSeriesV4(errGroupCtx, conn, st, en, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
+				})
+			}
+
+			if err := g.Wait(); err != nil {
+				log.Fatalf("error migration failed: %v", err)
+			}
+			log.Printf("migration finished")
 		}
-
-		g, errGroupCtx := errgroup.WithContext(context.Background())
-		sem := make(chan struct{}, *workers)
-
-		for t := firstTimesStamp; t < lastTimeStamp; t += 3600 {
-			start, end := t, min(t+3600, lastTimeStamp)
-
-			sem <- struct{}{}
-			st, en := start, end
-			g.Go(func() error {
-				defer func() { <-sem }()
-				return fetchAndInsertTimeSeriesV4(errGroupCtx, conn, st, en, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
-			})
-		}
-
-		if err := g.Wait(); err != nil {
-			log.Fatalf("error migration failed: %v", err)
-		}
-		log.Printf("migration finished")
 	}
 
+	fmt.Print("Do you want to migrate alerts and dashboards, if yes enter yes: ")
+	alertsInput, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error reading input:", err)
+		return
+	}
+	alertsCmd := strings.TrimSpace(alertsInput)
 	// ALerts and dashboards migrations
 
-	origDB := "signoz.db"
-	copyDB := "dashboards_copy.db"
+	if alertsCmd == "yes" {
+		origDB := *dbPath
 
-	// 1) copy the DB
-	if err := copyFile(origDB, copyDB); err != nil {
-		log.Fatalf("failed to copy DB: %v", err)
-	}
-	fmt.Println("✅ copied DB to", copyDB)
+		// build copy path in the same directory
+		dir := filepath.Dir(origDB)
+		base := filepath.Base(origDB)
+		copyDB := filepath.Join(dir, base+".copy")
 
-	err = migrateDashboards(metricDetails, attrMap, copyDB)
-	if err != nil {
-		log.Fatalf("error migrating dashboards: %v", err)
-	}
+		// 1) Copy original → working copy
+		if err := copyFile(origDB, copyDB); err != nil {
+			log.Fatalf("failed to copy DB %q → %q: %v", origDB, copyDB, err)
+		}
+		fmt.Println("✅ copied DB to", copyDB)
 
-	err = migrateRules(metricDetails, attrMap, copyDB)
-	if err != nil {
-		log.Fatalf("error migrating rules: %v", err)
+		// 2) Run both migrations on the copy
+		if err := migrateDashboards(metricDetails, attrMap, copyDB); err != nil {
+			log.Fatalf("error migrating dashboards on %q: %v", copyDB, err)
+		}
+		if err := migrateRules(metricDetails, attrMap, copyDB); err != nil {
+			log.Fatalf("error migrating rules on %q: %v", copyDB, err)
+		}
+
+		if err := os.Remove(origDB); err != nil {
+			log.Fatalf("failed to remove original DB %q: %v", origDB, err)
+		}
+		if err := os.Rename(copyDB, origDB); err != nil {
+			log.Fatalf("failed to rename %q → %q: %v", copyDB, origDB, err)
+		}
+		fmt.Printf("✅ replaced %q with migrated copy\n", origDB)
 	}
 
 }
