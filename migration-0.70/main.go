@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -958,21 +959,20 @@ func migrateDashboards(
 	attrMap map[string]string,
 	copyDB string,
 ) error {
-
-	// 2) open the copy
+	// open the copy
 	db, err := sql.Open("sqlite3", copyDB)
 	if err != nil {
-		return fmt.Errorf("failed to open copy: %v", err)
+		return fmt.Errorf("failed to open DB %s: %w", copyDB, err)
 	}
 	defer db.Close()
 
-	// Prepare in-string replacers once, for both metrics & attrs
+	// prepare in-string replacers once
 	replacers := buildReplacers(metricMap, attrMap)
 
-	// 3) select each dashboard row
+	// select each dashboard row
 	rows, err := db.Query(`SELECT id, data FROM dashboards`)
 	if err != nil {
-		return fmt.Errorf("query failed: %v", err)
+		return fmt.Errorf("query failed: %w", err)
 	}
 	defer rows.Close()
 
@@ -985,26 +985,26 @@ func migrateDashboards(
 	for rows.Next() {
 		var r row
 		if err := rows.Scan(&r.id, &r.data); err != nil {
-			return fmt.Errorf("scan failed: %v", err)
+			return fmt.Errorf("scan failed: %w", err)
 		}
 
-		// parse JSON
-		var payload interface{}
-		if err := json.Unmarshal(r.data, &payload); err != nil {
-			log.Printf("⚠️  skipping row %v: invalid JSON", r.id)
+		// parse into a map so we can selectively mutate
+		var dash map[string]interface{}
+		if err := json.Unmarshal(r.data, &dash); err != nil {
+			log.Printf("⚠️ skipping dashboard %v: invalid JSON", r.id)
 			continue
 		}
 
-		// traverse & replace (pass in replacers)
-		updated := traverse(payload, metricMap, attrMap, replacers)
+		// apply only the dashboard‐specific paths
+		applyReplacementsToDashboard(dash, metricMap, attrMap, replacers)
 
 		// marshal back
-		newBytes, err := json.Marshal(updated)
+		newBytes, err := json.Marshal(dash)
 		if err != nil {
-			return fmt.Errorf("re-marshal failed for row %v: %v", r.id, err)
+			return fmt.Errorf("re-marshal failed for dashboard %v: %w", r.id, err)
 		}
 
-		// only update if changed
+		// if changed, queue update
 		if !jsonEqual(r.data, newBytes) {
 			toUpdate = append(toUpdate, row{id: r.id, data: newBytes})
 		}
@@ -1013,24 +1013,24 @@ func migrateDashboards(
 	// apply updates in a transaction
 	tx, err := db.Begin()
 	if err != nil {
-		return fmt.Errorf("begin tx failed: %v", err)
+		return fmt.Errorf("begin tx failed: %w", err)
 	}
 	stmt, err := tx.Prepare(`UPDATE dashboards SET data = ? WHERE id = ?`)
 	if err != nil {
-		return fmt.Errorf("prepare failed: %v", err)
+		return fmt.Errorf("prepare failed: %w", err)
 	}
 	defer stmt.Close()
 
 	for _, r := range toUpdate {
 		if _, err := stmt.Exec(r.data, r.id); err != nil {
-			return fmt.Errorf("update failed for %v: %v", r.id, err)
+			return fmt.Errorf("update failed for dashboard %v: %w", r.id, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit failed: %v", err)
+		return fmt.Errorf("commit failed: %w", err)
 	}
 
-	fmt.Printf("✅ updated %d rows in %s\n", len(toUpdate), filepath.Base(copyDB))
+	fmt.Printf("✅ updated %d dashboards in %s\n", len(toUpdate), filepath.Base(copyDB))
 	return nil
 }
 
@@ -1148,23 +1148,145 @@ func jsonEqual(a, b []byte) bool {
 	return reflect.DeepEqual(oa, ob)
 }
 
+func applyReplacementsToDashboard(
+	dash map[string]interface{},
+	metricMap map[string]metricResult,
+	attrMap map[string]string,
+	replacers []struct {
+	re  *regexp.Regexp
+	dot string
+},
+) {
+	// 1) Variables
+	if varsRaw, ok := dash["variables"]; ok {
+		if vars, ok := varsRaw.(map[string]interface{}); ok {
+			for _, vRaw := range vars {
+				if vi, ok := vRaw.(map[string]interface{}); ok {
+					for _, field := range []string{"queryValue", "customValue", "textboxValue"} {
+						if sRaw, exists := vi[field]; exists {
+							if s, ok := sRaw.(string); ok {
+								vi[field] = replaceInString(s, metricMap, attrMap, replacers)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// helper to process a single widget-like object
+	processWidget := func(wi map[string]interface{}) {
+		// A) builder.queryData
+		if queryRaw, ok := wi["query"]; ok {
+			if qObj, ok := queryRaw.(map[string]interface{}); ok {
+				// builder
+				if builderRaw, ok := qObj["builder"]; ok {
+					if qb, ok := builderRaw.(map[string]interface{}); ok {
+						// queryData array
+						if qdRaw, exists := qb["queryData"]; exists {
+							if qd, ok := qdRaw.([]interface{}); ok {
+								for i, item := range qd {
+									if entry, ok := item.(map[string]interface{}); ok {
+										if dsRaw, exists2 := entry["dataSource"]; exists2 {
+											if ds, ok2 := dsRaw.(string); ok2 && ds == "metrics" {
+												qd[i] = traverse(entry, metricMap, attrMap, replacers)
+											}
+										}
+									}
+								}
+							}
+						}
+						// queryFormulas
+						if qfRaw, exists := qb["queryFormulas"]; exists {
+							if qfArr, ok := qfRaw.([]interface{}); ok {
+								for _, fi := range qfArr {
+									if f, ok := fi.(map[string]interface{}); ok {
+										if exprRaw, exists2 := f["expression"]; exists2 {
+											if expr, ok2 := exprRaw.(string); ok2 {
+												f["expression"] = replaceInString(expr, metricMap, attrMap, replacers)
+											}
+										}
+										if lgRaw, exists2 := f["legend"]; exists2 {
+											if lg, ok2 := lgRaw.(string); ok2 {
+												f["legend"] = replaceInString(lg, metricMap, attrMap, replacers)
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+				// B) clickhouse_sql
+				if chRaw, exists := qObj["clickhouse_sql"]; exists {
+					if chArr, ok := chRaw.([]interface{}); ok {
+						for _, ciRaw := range chArr {
+							if cqi, ok := ciRaw.(map[string]interface{}); ok {
+								if qRaw, exists2 := cqi["query"]; exists2 {
+									if q, ok2 := qRaw.(string); ok2 {
+										cqi["query"] = replaceInString(q, metricMap, attrMap, replacers)
+									}
+								}
+							}
+						}
+					}
+				}
+				// C) promql
+				if prRaw, exists := qObj["promql"]; exists {
+					if prArr, ok := prRaw.([]interface{}); ok {
+						for _, piRaw := range prArr {
+							if pqi, ok := piRaw.(map[string]interface{}); ok {
+								if qRaw, exists2 := pqi["query"]; exists2 {
+									if q, ok2 := qRaw.(string); ok2 {
+										pqi["query"] = replaceInString(q, metricMap, attrMap, replacers)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 2) Widgets array
+	if wArrRaw, ok := dash["widgets"]; ok {
+		if wArr, ok := wArrRaw.([]interface{}); ok {
+			for _, wRaw := range wArr {
+				if wi, ok := wRaw.(map[string]interface{}); ok {
+					processWidget(wi)
+				}
+			}
+		}
+	}
+
+	// 3) panelMap
+	if pmRaw, ok := dash["panelMap"]; ok {
+		if pm, ok := pmRaw.(map[string]interface{}); ok {
+			for _, vRaw := range pm {
+				if wi, ok := vRaw.(map[string]interface{}); ok {
+					processWidget(wi)
+				}
+			}
+		}
+	}
+}
 func migrateRules(
 	metricMap map[string]metricResult,
 	attrMap map[string]string,
 	dbPath string,
 ) error {
-
-	// open DB
+	// 1) open DB
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to open DB %s: %w", dbPath, err)
 	}
 	defer db.Close()
 
-	// build in-string replacers once
+	// 2) build in-string replacers once
 	replacers := buildReplacers(metricMap, attrMap)
 
-	// select id + data
+	// 3) select id + data
 	rows, err := db.Query(`SELECT id, data FROM rule`)
 	if err != nil {
 		return fmt.Errorf("query failed: %w", err)
@@ -1183,29 +1305,29 @@ func migrateRules(
 			return fmt.Errorf("scan failed: %w", err)
 		}
 
-		// parse JSON
-		var payload interface{}
-		if err := json.Unmarshal(r.data, &payload); err != nil {
+		// parse into a map so we can selectively mutate
+		var alertObj map[string]interface{}
+		if err := json.Unmarshal(r.data, &alertObj); err != nil {
 			log.Printf("⚠️ skipping rule %v: invalid JSON", r.id)
 			continue
 		}
 
-		// normalize underscore→dot
-		updated := traverse(payload, metricMap, attrMap, replacers)
+		// only mutate promQueries, chQueries, builder.queryData where dataSource=="metrics"
+		applyReplacementsToAlert(alertObj, metricMap, attrMap, replacers)
 
 		// marshal back
-		newBytes, err := json.Marshal(updated)
+		newBytes, err := json.Marshal(alertObj)
 		if err != nil {
 			return fmt.Errorf("re-marshal failed for rule %v: %w", r.id, err)
 		}
 
-		// compare
+		// semantic compare
 		if !jsonEqual(r.data, newBytes) {
 			toUpdate = append(toUpdate, ruleRow{id: r.id, data: newBytes})
 		}
 	}
 
-	// apply updates
+	// 4) apply updates in a transaction
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin tx failed: %w", err)
@@ -1227,4 +1349,189 @@ func migrateRules(
 
 	fmt.Printf("✅ updated %d rules in %s\n", len(toUpdate), dbPath)
 	return nil
+}
+
+func applyReplacementsToAlert(
+	alert map[string]interface{},
+	metricMap map[string]metricResult,
+	attrMap map[string]string,
+	replacers []struct {
+	re  *regexp.Regexp
+	dot string
+},
+) {
+	// helper to replace in a standalone SQL/PromQL string
+	replaceStr := func(s string) string {
+		// exact-match
+		if m, ok := metricMap[s]; ok {
+			return m.unNormMetricName
+		}
+		if dot, ok := attrMap[s]; ok {
+			return dot
+		}
+		// in-string
+		out := s
+		for _, r := range replacers {
+			out = r.re.ReplaceAllString(out, r.dot)
+		}
+		return out
+	}
+
+	// 1) Navigate to compositeQuery
+	condRaw, ok := alert["condition"]
+	if !ok {
+		return
+	}
+	cond, ok := condRaw.(map[string]interface{})
+	if !ok {
+		return
+	}
+	cqRaw, ok := cond["compositeQuery"]
+	if !ok {
+		return
+	}
+	cq, ok := cqRaw.(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	// 2) promQueries
+	if pqRaw, ok := cq["promQueries"]; ok {
+		if pq, ok := pqRaw.(map[string]interface{}); ok {
+			for _, v := range pq {
+				if entry, ok := v.(map[string]interface{}); ok {
+					if qr, ok := entry["query"].(string); ok {
+						entry["query"] = replaceStr(qr)
+					}
+				}
+			}
+		}
+	}
+
+	// 3) chQueries
+	if chRaw, ok := cq["chQueries"]; ok {
+		if chq, ok := chRaw.(map[string]interface{}); ok {
+			for _, v := range chq {
+				if entry, ok := v.(map[string]interface{}); ok {
+					if qr, ok := entry["query"].(string); ok {
+						entry["query"] = replaceStr(qr)
+					}
+				}
+			}
+		}
+	}
+
+	// 4) builderQueries (METRIC_BASED_ALERT)
+	if bqRaw, ok := cq["builderQueries"]; ok {
+		if bq, ok := bqRaw.(map[string]interface{}); ok {
+			for key, v := range bq {
+				if entry, ok := v.(map[string]interface{}); ok {
+					if ds, ok := entry["dataSource"].(string); ok && ds == "metrics" {
+						bq[key] = traverse(entry, metricMap, attrMap, replacers)
+					}
+				}
+			}
+		}
+	}
+
+	// 5) builder.queryData (other alerts)
+	if builderRaw, ok := cq["builder"]; ok {
+		if builder, ok := builderRaw.(map[string]interface{}); ok {
+			if qdRaw, exists := builder["queryData"]; exists {
+				if qd, ok := qdRaw.([]interface{}); ok {
+					for i, item := range qd {
+						if entry, ok := item.(map[string]interface{}); ok {
+							if ds, ok := entry["dataSource"].(string); ok && ds == "metrics" {
+								qd[i] = traverse(entry, metricMap, attrMap, replacers)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 6) annotations
+	if annRaw, ok := alert["annotations"]; ok {
+		if ann, ok := annRaw.(map[string]interface{}); ok {
+			if d, ok := ann["description"].(string); ok {
+				ann["description"] = replaceStr(d)
+			}
+			if s, ok := ann["summary"].(string); ok {
+				ann["summary"] = replaceStr(s)
+			}
+		}
+	}
+
+	// 7) labels
+	if lblsRaw, ok := alert["labels"]; ok {
+		if lbls, ok := lblsRaw.(map[string]interface{}); ok {
+			newLabels := make(map[string]interface{}, len(lbls))
+			for k, v := range lbls {
+				newKey := replaceStr(k)
+				if sv, ok := v.(string); ok {
+					newLabels[newKey] = replaceStr(sv)
+				} else {
+					newLabels[newKey] = v
+				}
+			}
+			alert["labels"] = newLabels
+		}
+	}
+
+	// 8) update embedded compositeQuery in source URL
+	if srcRaw, ok := alert["source"].(string); ok {
+		if u, err := url.Parse(srcRaw); err == nil {
+			vals := u.Query()
+			if cqEnc := vals.Get("compositeQuery"); cqEnc != "" {
+				// decode twice
+				if once, err := url.QueryUnescape(cqEnc); err == nil {
+					if twice, err := url.QueryUnescape(once); err == nil {
+						var embedded interface{}
+						if err := json.Unmarshal([]byte(twice), &embedded); err == nil {
+							// apply same transformations to embedded.compositeQuery
+							if emap, ok := embedded.(map[string]interface{}); ok {
+								applyReplacementsToAlert(
+									map[string]interface{}{"condition": map[string]interface{}{"compositeQuery": emap}},
+									metricMap, attrMap, replacers,
+								)
+								if newBytes, err := json.Marshal(emap); err == nil {
+									esc1 := url.QueryEscape(string(newBytes))
+									esc2 := url.QueryEscape(esc1)
+									vals.Set("compositeQuery", esc2)
+									u.RawQuery = vals.Encode()
+									alert["source"] = u.String()
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// helper to replace inside a standalone SQL string
+func replaceInString(
+	s string,
+	metricMap map[string]metricResult,
+	attrMap map[string]string,
+	replacers []struct {
+	re  *regexp.Regexp
+	dot string
+},
+) string {
+	// exact match
+	if m, ok := metricMap[s]; ok {
+		return m.unNormMetricName
+	}
+	if dot, ok := attrMap[s]; ok {
+		return dot
+	}
+	// in-string
+	out := s
+	for _, r := range replacers {
+		out = r.re.ReplaceAllString(out, r.dot)
+	}
+	return out
 }
