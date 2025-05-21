@@ -98,153 +98,159 @@ type metricResult struct {
 	err                 error
 }
 
-func main() {
-	var (
-		workers      = flag.Int("workers", helpers.EnvOrInt("MIGRATE_WORKERS", 4), "concurrent hour-windows to process")
-		maxOpenConns = flag.Int("max-open-conns", helpers.EnvOrInt("MIGRATE_MAX_OPEN_CONNS", 16), "ClickHouse connection pool size")
-		dbPath       = flag.String("db-path", helpers.EnvOr("SQL_DB_PATH", "./signoz.db"), "database path")
-	)
-	flag.Parse()
-
-	defaultsAttrs := map[string]string{
-		"quantile": "quantile",
+func commonPreRun(maxOpenConns int) (clickhouse.Conn, map[string]metricResult, map[string]string, error) {
+	conn, err := getClickhouseConn(maxOpenConns)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("error connecting to ClickHouse: %w", err)
 	}
-	defaultsMerics := map[string]string{
+	// 1) fetch normalized metrics
+	metrics, missing, err := GetCorrespondingNormalizedMetrics(conn)
+	if err != nil {
+		conn.Close()
+		return nil, nil, nil, fmt.Errorf("error getting metric names: %w", err)
+	}
+	// overlay fallback maps
+	defaultMetrics := map[string]string{
 		"certmanager_http_acme_client_request_duration_seconds":     "certmanager_http_acme_client_request_duration_seconds",
 		"redis_latency_percentiles_usec":                            "redis_latency_percentiles_usec",
 		"go_gc_duration_seconds":                                    "go_gc_duration_seconds",
 		"nginx_ingress_controller_ingress_upstream_latency_seconds": "nginx_ingress_controller_ingress_upstream_latency_seconds",
 	}
-	notFoundAttrMap := helpers.OverlayFromEnv(defaultsAttrs, "NOT_FOUND_ATTR_MAP")
-	notFoundMetricsMap := helpers.OverlayFromEnv(defaultsMerics, "NOT_FOUND_METRICS_MAP")
-
-	conn, err := getClickhouseConn(*maxOpenConns)
-	if err != nil {
-		log.Fatalf("error connecting to ClickHouse: %v", err)
-	}
-	defer func() {
-		if err := conn.Close(); err != nil {
-			log.Printf("error closing ClickHouse connection: %v", err)
-		}
-	}()
-
-	metrics, missing, err := GetCorrespondingNormalizedMetrics(conn)
-	if err != nil {
-		log.Fatalf("error getting all metric names: %v", err)
-	}
-
-	log.Printf("metrics total: %v", len(metrics))
-
-	log.Printf("metrics missing: %v", missing)
-
-	for _, metric := range missing {
-		if _, ok := notFoundMetricsMap[metric]; !ok {
-			log.Fatalf("missing metrics, please add it to NOT_FOUND_METRIC_MAP: %s", metric)
+	notFoundMetricsMap := helpers.OverlayFromEnv(defaultMetrics, "NOT_FOUND_METRICS_MAP")
+	for _, m := range missing {
+		if v, ok := notFoundMetricsMap[m]; ok {
+			metrics[m] = v
 		} else {
-			metrics[metric] = notFoundMetricsMap[metric]
+			conn.Close()
+			return nil, nil, nil, fmt.Errorf("missing metrics map entry for %s", m)
 		}
 	}
-
+	// 2) build attribute map
+	defaultAttrs := map[string]string{"quantile": "quantile"}
+	notFoundAttrMap := helpers.OverlayFromEnv(defaultAttrs, "NOT_FOUND_ATTR_MAP")
 	metricDetails, attrMap, err := buildMetricDetails(conn, metrics, notFoundAttrMap)
 	if err != nil {
-		log.Fatalf("error building metric details: %v", err)
+		conn.Close()
+		return nil, nil, nil, fmt.Errorf("error building metric details: %w", err)
 	}
-	firstTimesStamp, err := getFirstTimeStampforNormalizedData(conn)
+	return conn, metricDetails, attrMap, nil
+}
+
+func migrateHighRetention(maxOpenConns, workers int) error {
+	conn, metricDetails, _, err := commonPreRun(maxOpenConns)
 	if err != nil {
-		log.Fatalf("error getting first timestamp: %v", err)
+		return err
 	}
-	lastTimeStamp, err := getfirstTimeStampforNonNormalizedData(conn)
+	defer conn.Close()
+
+	// get timestamps
+	firstTS, err := getFirstTimeStampforNormalizedData(conn)
 	if err != nil {
-		log.Fatalf("error getting last timestamp: %v", err)
+		return fmt.Errorf("error getting first timestamp: %w", err)
+	}
+	lastTS, err := getfirstTimeStampforNonNormalizedData(conn)
+	if err != nil {
+		return fmt.Errorf("error getting last timestamp: %w", err)
 	}
 
 	reader := bufio.NewReader(os.Stdin)
-
-	if firstTimesStamp < lastTimeStamp {
-		fmt.Print("Do you want to migrate old high retention data, if yes enter yes: ")
-		input, err := reader.ReadString('\n')
+	if firstTS < lastTS {
+		fmt.Printf("Migrate data [%d…%d]? (yes): ", firstTS, lastTS)
+		input, _ := reader.ReadString('\n')
+		if strings.TrimSpace(input) != "yes" {
+			return nil
+		}
+		resAttrs, scopeAttrs, pointAttrs, err := getAllDifferentMetricsAttributes(conn)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "error reading input:", err)
-			return
+			return fmt.Errorf("error getting all attributes: %w", err)
 		}
-		cmd := strings.TrimSpace(input)
-		if cmd == "yes" {
-			//how many rows to be inserted
-			log.Printf("migrating window [%d … %d) (%.1f h total)",
-				firstTimesStamp, lastTimeStamp, float64(lastTimeStamp-firstTimesStamp)/3_600_000)
-
-			tsCount, err := countOfNormalizedRowsTs(conn, firstTimesStamp, lastTimeStamp)
-			if err != nil {
-				log.Fatalf("error counting rows: %v", err)
-			}
-			log.Printf("total ts rows: %d", tsCount)
-			//first fetch last an hour data
-			allResourceAttrs, allScopeAttrs, allPointAttr, err := getAllDifferentMetricsAttributes(conn)
-			if err != nil {
-				log.Fatalf("error getting all attributes: %v", err)
-			}
-
-			g, errGroupCtx := errgroup.WithContext(context.Background())
-			sem := make(chan struct{}, *workers)
-
-			for t := firstTimesStamp; t < lastTimeStamp; t += 3600 {
-				start, end := t, min(t+3600, lastTimeStamp)
-
-				sem <- struct{}{}
-				st, en := start, end
-				g.Go(func() error {
-					defer func() { <-sem }()
-					return fetchAndInsertTimeSeriesV4(errGroupCtx, conn, st, en, metricDetails, allResourceAttrs, allScopeAttrs, allPointAttr)
-				})
-			}
-
-			if err := g.Wait(); err != nil {
-				log.Fatalf("error migration failed: %v", err)
-			}
-			log.Printf("migration finished")
+		g, ctx := errgroup.WithContext(context.Background())
+		sem := make(chan struct{}, workers)
+		for t := firstTS; t < lastTS; t += 3600 {
+			start, end := t, min(t+3600, lastTS)
+			sem <- struct{}{}
+			g.Go(func() error {
+				defer func() { <-sem }()
+				return fetchAndInsertTimeSeriesV4(ctx, conn, start, end, metricDetails, resAttrs, scopeAttrs, pointAttrs)
+			})
 		}
+		if err := g.Wait(); err != nil {
+			return fmt.Errorf("migration failed: %w", err)
+		}
+		log.Printf("Data migration completed [%d…%d]", firstTS, lastTS)
 	}
+	return nil
+}
 
-	fmt.Print("Do you want to migrate alerts and dashboards, if yes enter yes: ")
-	alertsInput, err := reader.ReadString('\n')
+func migrateMeta(maxOpenConns int, dbPath string) error {
+	conn, metricDetails, attrMap, err := commonPreRun(maxOpenConns)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error reading input:", err)
-		return
+		return err
 	}
-	alertsCmd := strings.TrimSpace(alertsInput)
-	// ALerts and dashboards migrations
+	defer conn.Close()
 
-	if alertsCmd == "yes" {
-		origDB := *dbPath
-
-		// build copy path in the same directory
-		dir := filepath.Dir(origDB)
-		base := filepath.Base(origDB)
-		copyDB := filepath.Join(dir, base+".copy")
-
-		// 1) Copy original → working copy
-		if err := copyFile(origDB, copyDB); err != nil {
-			log.Fatalf("failed to copy DB %q → %q: %v", origDB, copyDB, err)
-		}
-		fmt.Println("✅ copied DB to", copyDB)
-
-		// 2) Run both migrations on the copy
-		if err := migrateDashboards(metricDetails, attrMap, copyDB); err != nil {
-			log.Fatalf("error migrating dashboards on %q: %v", copyDB, err)
-		}
-		if err := migrateRules(metricDetails, attrMap, copyDB); err != nil {
-			log.Fatalf("error migrating rules on %q: %v", copyDB, err)
-		}
-
-		if err := os.Remove(origDB); err != nil {
-			log.Fatalf("failed to remove original DB %q: %v", origDB, err)
-		}
-		if err := os.Rename(copyDB, origDB); err != nil {
-			log.Fatalf("failed to rename %q → %q: %v", copyDB, origDB, err)
-		}
-		fmt.Printf("✅ replaced %q with migrated copy\n", origDB)
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Printf("Migrate alerts & dashboards in %s? (yes): ", dbPath)
+	input, _ := reader.ReadString('\n')
+	if strings.TrimSpace(input) != "yes" {
+		return nil
 	}
+	orig := dbPath
+	copyDB := filepath.Join(filepath.Dir(orig), filepath.Base(orig)+".copy")
+	if err := copyFile(orig, copyDB); err != nil {
+		return fmt.Errorf("failed to copy DB: %w", err)
+	}
+	fmt.Println("✅ copied DB to", copyDB)
 
+	if err := migrateDashboards(metricDetails, attrMap, copyDB); err != nil {
+		return fmt.Errorf("dashboards migration failed: %w", err)
+	}
+	if err := migrateRules(metricDetails, attrMap, copyDB); err != nil {
+		return fmt.Errorf("rules migration failed: %w", err)
+	}
+	if err := os.Remove(orig); err != nil {
+		return fmt.Errorf("remove original DB: %w", err)
+	}
+	if err := os.Rename(copyDB, orig); err != nil {
+		return fmt.Errorf("replace DB: %w", err)
+	}
+	log.Printf("Alerts & dashboards migration completed in %s", orig)
+	return nil
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Fprintf(os.Stderr, "Usage: %s <migrate-data|migrate-meta> [flags]\n", os.Args[0])
+		os.Exit(1)
+	}
+	cmd := os.Args[1]
+	switch cmd {
+	case "migrate-data":
+		fs := flag.NewFlagSet("migrate-data", flag.ExitOnError)
+		workers := fs.Int("workers", helpers.EnvOrInt("MIGRATE_WORKERS", 4), "hour-windows to process")
+		maxOpen := fs.Int("max-open-conns", helpers.EnvOrInt("MIGRATE_MAX_OPEN_CONNS", 16), "ClickHouse pool size")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			log.Fatalf("failed to parse flags for %s: %v", cmd, err)
+		}
+		if err := migrateHighRetention(*maxOpen, *workers); err != nil {
+			log.Fatalf("data migration failed: %v", err)
+		}
+
+	case "migrate-meta":
+		fs := flag.NewFlagSet("migrate-meta", flag.ExitOnError)
+		maxOpen := fs.Int("max-open-conns", helpers.EnvOrInt("MIGRATE_MAX_OPEN_CONNS", 16), "ClickHouse pool size")
+		dbp := fs.String("db-path", helpers.EnvOr("SQL_DB_PATH", "./signoz.db"), "SQLite DB path")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			log.Fatalf("failed to parse flags for %s: %v", cmd, err)
+		}
+		if err := migrateMeta(*maxOpen, *dbp); err != nil {
+			log.Fatalf("alerts/dashboard migration failed: %v", err)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown command %q\n", cmd)
+		os.Exit(2)
+	}
 }
 
 func buildMetricDetails(conn clickhouse.Conn, metrics map[string]string, notFoundAttrMap map[string]string) (map[string]metricResult, map[string]string, error) {
