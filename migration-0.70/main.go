@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -88,17 +89,7 @@ type metricJob struct {
 	unNormMetricName string
 }
 
-// result from checking one metric pair
-type metricResult struct {
-	normMetricName      string
-	unNormMetricName    string
-	normAttributes      []string
-	unNormAttributes    []string
-	normToUnNormAttrMap map[string]string
-	err                 error
-}
-
-func commonPreRun(maxOpenConns int) (clickhouse.Conn, map[string]metricResult, map[string]string, error) {
+func commonPreRun(maxOpenConns int) (clickhouse.Conn, map[string]helpers.MetricResult, map[string]string, error) {
 	conn, err := getClickhouseConn(maxOpenConns)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("error connecting to ClickHouse: %w", err)
@@ -188,7 +179,6 @@ func migrateMeta(maxOpenConns int, dbPath string) error {
 		return err
 	}
 	defer conn.Close()
-
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Printf("Migrate alerts & dashboards in %s? (yes): ", dbPath)
 	input, _ := reader.ReadString('\n')
@@ -202,10 +192,13 @@ func migrateMeta(maxOpenConns int, dbPath string) error {
 	}
 	fmt.Println("✅ copied DB to", copyDB)
 
-	if err := migrateDashboards(metricDetails, attrMap, copyDB); err != nil {
+	transformer := helpers.NewQueryTransformer(metricDetails)
+	migrator := DashAlertsMigrator{queryTransformer: transformer}
+
+	if err := migrator.migrateDashboards(metricDetails, attrMap, copyDB); err != nil {
 		return fmt.Errorf("dashboards migration failed: %w", err)
 	}
-	if err := migrateRules(metricDetails, attrMap, copyDB); err != nil {
+	if err := migrator.migrateRules(metricDetails, attrMap, copyDB); err != nil {
 		return fmt.Errorf("rules migration failed: %w", err)
 	}
 	if err := os.Remove(orig); err != nil {
@@ -253,12 +246,16 @@ func main() {
 	}
 }
 
-func buildMetricDetails(conn clickhouse.Conn, metrics map[string]string, notFoundAttrMap map[string]string) (map[string]metricResult, map[string]string, error) {
+type DashAlertsMigrator struct {
+	queryTransformer *helpers.QueryTransformer
+}
+
+func buildMetricDetails(conn clickhouse.Conn, metrics map[string]string, notFoundAttrMap map[string]string) (map[string]helpers.MetricResult, map[string]string, error) {
 
 	var workerCount = 4
 
 	jobs := make(chan metricJob, len(metrics))
-	results := make(chan metricResult, len(metrics))
+	results := make(chan helpers.MetricResult, len(metrics))
 
 	var wg sync.WaitGroup
 	for i := 0; i < workerCount; i++ {
@@ -268,7 +265,7 @@ func buildMetricDetails(conn clickhouse.Conn, metrics map[string]string, notFoun
 			for job := range jobs {
 				// do the work
 				attrmap, normAttrs, unNormAttrs, err := checkAllAttributesOfTwoMetrics(conn, job.normMetricName, job.unNormMetricName)
-				results <- metricResult{job.normMetricName, job.unNormMetricName, normAttrs, unNormAttrs, attrmap, err}
+				results <- helpers.MetricResult{job.normMetricName, job.unNormMetricName, normAttrs, unNormAttrs, attrmap, err}
 			}
 		}()
 	}
@@ -291,35 +288,35 @@ func buildMetricDetails(conn clickhouse.Conn, metrics map[string]string, notFoun
 	validMetrics := make(map[string]string, len(metrics))
 	nonValidMetrics := make(map[string]string, len(metrics))
 	var mu sync.Mutex
-	metricDetails := make(map[string]metricResult)
+	metricDetails := make(map[string]helpers.MetricResult)
 	allAttributeMap := make(map[string]string)
 	for res := range results {
-		metricDetails[res.normMetricName] = res
-		if res.err != nil {
-			log.Fatalf("error checking metric %s → %s: %v", res.normMetricName, res.unNormMetricName, res.err)
+		metricDetails[res.NormMetricName] = res
+		if res.Err != nil {
+			log.Fatalf("error checking metric %s → %s: %v", res.NormMetricName, res.UnNormMetricName, res.Err)
 		} else {
 			//log.Printf("metrics name %s -> %s", res.key, res.name) // uncomment this line to check for valid metrics.
 		}
-		allAttributeMap = mergeMaps(allAttributeMap, res.normToUnNormAttrMap)
+		allAttributeMap = helpers.MergeMaps(allAttributeMap, res.NormToUnNormAttrMap)
 		switch {
-		case len(res.normAttributes) == 0 && len(res.unNormAttributes) == 0:
+		case len(res.NormAttributes) == 0 && len(res.UnNormAttributes) == 0:
 			mu.Lock()
-			validMetrics[res.normMetricName] = res.unNormMetricName
+			validMetrics[res.NormMetricName] = res.UnNormMetricName
 			//log.Printf("valid metric name: %s to %s", res.key, res.name)
 			mu.Unlock()
 
 		default:
 			// anything else is "non-valid"
 			mu.Lock()
-			nonValidMetrics[res.normMetricName] = res.unNormMetricName
+			nonValidMetrics[res.NormMetricName] = res.UnNormMetricName
 			mu.Unlock()
 
 			// still log the details for visibility
-			if len(res.normAttributes) > 0 {
-				log.Printf("extra attributes in underscore metric %s: %v", res.normMetricName, res.normAttributes)
+			if len(res.NormAttributes) > 0 {
+				log.Printf("extra attributes in underscore metric %s: %v", res.NormMetricName, res.NormAttributes)
 			}
-			if len(res.unNormAttributes) > 0 {
-				log.Printf("extra attributes in dot metric %s: %v", res.unNormMetricName, res.unNormAttributes)
+			if len(res.UnNormAttributes) > 0 {
+				log.Printf("extra attributes in dot metric %s: %v", res.UnNormMetricName, res.UnNormAttributes)
 			}
 		}
 	}
@@ -327,17 +324,17 @@ func buildMetricDetails(conn clickhouse.Conn, metrics map[string]string, notFoun
 	notFound := make(map[string]struct{})
 
 	for _, metricDetail := range metricDetails {
-		if len(metricDetail.normAttributes) != 0 {
-			for _, attr := range metricDetail.normAttributes {
+		if len(metricDetail.NormAttributes) != 0 {
+			for _, attr := range metricDetail.NormAttributes {
 				if _, ok := allAttributeMap[attr]; !ok {
 					if _, ok := notFoundAttrMap[attr]; !ok {
 						notFound[attr] = struct{}{}
 					} else {
 						allAttributeMap[attr] = notFoundAttrMap[attr]
-						metricDetail.normToUnNormAttrMap[attr] = notFoundAttrMap[attr]
+						metricDetail.NormToUnNormAttrMap[attr] = notFoundAttrMap[attr]
 					}
 				} else {
-					metricDetail.normToUnNormAttrMap[attr] = allAttributeMap[attr]
+					metricDetail.NormToUnNormAttrMap[attr] = allAttributeMap[attr]
 				}
 			}
 		}
@@ -390,7 +387,7 @@ FROM signoz_metrics.distributed_metadata`)
 	return toSet(resSlice), toSet(scopeSlice), toSet(attrSlice), nil
 }
 
-func fetchAndInsertTimeSeriesV4(ctx context.Context, conn clickhouse.Conn, start, end int64, metricDetails map[string]metricResult, allResourceAttrs, allScopeAttrs, allPointAttrs map[string]struct{}) error {
+func fetchAndInsertTimeSeriesV4(ctx context.Context, conn clickhouse.Conn, start, end int64, metricDetails map[string]helpers.MetricResult, allResourceAttrs, allScopeAttrs, allPointAttrs map[string]struct{}) error {
 	const maxRowsPerBatch = 1_000_000
 
 	ctx = cappedCHContext(ctx)
@@ -478,7 +475,7 @@ func fetchAndInsertTimeSeriesV4(ctx context.Context, conn clickhouse.Conn, start
 		pointAttrs := make(map[string]string)
 
 		for k, v := range labelMap {
-			clean := md.normToUnNormAttrMap[k]
+			clean := md.NormToUnNormAttrMap[k]
 
 			if _, ok := allResourceAttrs[clean]; ok {
 				resourceAttrs[clean] = v
@@ -508,7 +505,7 @@ func fetchAndInsertTimeSeriesV4(ctx context.Context, conn clickhouse.Conn, start
 		var unNorm ts
 		unNorm.Env = norm.Env
 		unNorm.Temporality = norm.Temporality
-		unNorm.MetricName = md.unNormMetricName
+		unNorm.MetricName = md.UnNormMetricName
 		unNorm.Description = norm.Description
 		unNorm.Unit = norm.Unit
 		unNorm.Type = norm.Type
@@ -627,7 +624,7 @@ func fetchAndInsertTimeSeriesV4(ctx context.Context, conn clickhouse.Conn, start
 		md := metricDetails[normS.metricName]
 		unNormS.env = normS.env
 		unNormS.temporality = normS.temporality
-		unNormS.metricName = md.unNormMetricName
+		unNormS.metricName = md.UnNormMetricName
 		unNormS.fingerprint = fingerprintMap[normS.fingerprint]
 		unNormS.unixMilli = normS.unixMilli
 		unNormS.value = normS.value
@@ -949,19 +946,8 @@ func cappedCHContext(parent context.Context) context.Context {
 	)
 }
 
-func mergeMaps(a, b map[string]string) map[string]string {
-	out := make(map[string]string, len(a)+len(b))
-	for k, v := range a {
-		out[k] = v
-	}
-	for k, v := range b {
-		out[k] = v
-	}
-	return out
-}
-
-func migrateDashboards(
-	metricMap map[string]metricResult,
+func (m *DashAlertsMigrator) migrateDashboards(
+	metricMap map[string]helpers.MetricResult,
 	attrMap map[string]string,
 	copyDB string,
 ) error {
@@ -1002,7 +988,10 @@ func migrateDashboards(
 		}
 
 		// apply only the dashboard‐specific paths
-		applyReplacementsToDashboard(dash, metricMap, attrMap, replacers)
+		err := m.applyReplacementsToDashboard(dash, metricMap, attrMap, replacers)
+		if err != nil {
+			return fmt.Errorf("error getting for dashboard-id: %v, for error  - %v", r.id, err)
+		}
 
 		// marshal back
 		newBytes, err := json.Marshal(dash)
@@ -1041,52 +1030,69 @@ func migrateDashboards(
 }
 
 type replacer struct {
-	re  *regexp.Regexp
-	dot string
-}
-
-func buildReplacers(
-	metricMap map[string]metricResult,
-	attrMap map[string]string,
-) []struct {
-	re  *regexp.Regexp
-	dot string
-} {
-	var reps []struct {
+	re         *regexp.Regexp
+	dot        string
+	metricName map[string]struct {
 		re  *regexp.Regexp
 		dot string
 	}
+}
+
+func buildReplacers(
+	metricMap map[string]helpers.MetricResult,
+	attrMap map[string]string,
+) []replacer {
+	var reps []replacer
+
 	for under, m := range metricMap {
-		patt := `\b` + regexp.QuoteMeta(under) + `\b`
-		reps = append(reps, struct {
+		metricAttrMap := make(map[string]struct {
 			re  *regexp.Regexp
 			dot string
-		}{re: regexp.MustCompile(patt), dot: m.unNormMetricName})
+		})
+
+		// Add nested attr-level replacers
+		for normName, unNormName := range m.NormToUnNormAttrMap {
+			patt := `\b` + regexp.QuoteMeta(unNormName) + `\b`
+			metricAttrMap[normName] = struct {
+				re  *regexp.Regexp
+				dot string
+			}{
+				re:  regexp.MustCompile(patt),
+				dot: unNormName,
+			}
+		}
+
+		patt := `\b` + regexp.QuoteMeta(under) + `\b`
+		reps = append(reps, replacer{
+			re:         regexp.MustCompile(patt),
+			dot:        m.UnNormMetricName,
+			metricName: metricAttrMap,
+		})
 	}
+
 	for under, dot := range attrMap {
 		patt := `\b` + regexp.QuoteMeta(under) + `\b`
-		reps = append(reps, struct {
-			re  *regexp.Regexp
-			dot string
-		}{re: regexp.MustCompile(patt), dot: dot})
+		reps = append(reps, replacer{
+			re:         regexp.MustCompile(patt),
+			dot:        dot,
+			metricName: nil, // No nested attrMap here
+		})
 	}
+
 	return reps
 }
 
 func traverse(
 	v interface{},
-	metricMap map[string]metricResult,
+	metricMap map[string]helpers.MetricResult,
 	attrMap map[string]string,
-	replacers []struct {
-	re  *regexp.Regexp
-	dot string
-},
+	replacers []replacer,
 ) interface{} {
 	switch x := v.(type) {
 	case string:
 		// 1) exact match on whole string
 		if m, ok := metricMap[x]; ok {
-			return m.unNormMetricName
+			return m.UnNormMetricName
 		}
 		if dot, ok := attrMap[x]; ok {
 			return dot
@@ -1109,7 +1115,7 @@ func traverse(
 		for k, e := range x {
 			newKey := k
 			if m, ok := metricMap[k]; ok {
-				newKey = m.unNormMetricName
+				newKey = m.UnNormMetricName
 			} else if dot, ok := attrMap[k]; ok {
 				newKey = dot
 			}
@@ -1154,24 +1160,33 @@ func jsonEqual(a, b []byte) bool {
 	return reflect.DeepEqual(oa, ob)
 }
 
-func applyReplacementsToDashboard(
+func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 	dash map[string]interface{},
-	metricMap map[string]metricResult,
+	metricMap map[string]helpers.MetricResult,
 	attrMap map[string]string,
-	replacers []struct {
-	re  *regexp.Regexp
-	dot string
-},
-) {
+	replacers []replacer,
+) error {
 	// 1) Variables
 	if varsRaw, ok := dash["variables"]; ok {
 		if vars, ok := varsRaw.(map[string]interface{}); ok {
 			for _, vRaw := range vars {
 				if vi, ok := vRaw.(map[string]interface{}); ok {
-					for _, field := range []string{"queryValue", "customValue", "textboxValue"} {
+					for _, field := range []string{"queryValue"} {
 						if sRaw, exists := vi[field]; exists {
-							if s, ok := sRaw.(string); ok {
-								vi[field] = replaceInString(s, metricMap, attrMap, replacers)
+							if s, ok := sRaw.(string); ok && s != "" {
+								query := helpers.ConvertTemplateToNamedParams(s)
+								metrics, err := helpers.ExtractMetrics(query, metricMap)
+								if err != nil {
+									//return err
+								}
+								var metricResults []helpers.MetricResult
+								for _, metric := range metrics {
+									metricResults = append(metricResults, metricMap[metric])
+								}
+								vi[field], err = m.queryTransformer.TransformQuery(query, metricResults, attrMap)
+								if err != nil {
+									return err
+								}
 							}
 						}
 					}
@@ -1181,7 +1196,7 @@ func applyReplacementsToDashboard(
 	}
 
 	// helper to process a single widget-like object
-	processWidget := func(wi map[string]interface{}) {
+	processWidget := func(wi map[string]interface{}) error {
 		// A) builder.queryData
 		if queryRaw, ok := wi["query"]; ok {
 			if qObj, ok := queryRaw.(map[string]interface{}); ok {
@@ -1229,8 +1244,22 @@ func applyReplacementsToDashboard(
 						for _, ciRaw := range chArr {
 							if cqi, ok := ciRaw.(map[string]interface{}); ok {
 								if qRaw, exists2 := cqi["query"]; exists2 {
-									if q, ok2 := qRaw.(string); ok2 {
-										cqi["query"] = replaceInString(q, metricMap, attrMap, replacers)
+									if q, ok2 := qRaw.(string); ok2 && q != "" {
+										if strings.Contains(q, "signoz_metrics") {
+											query := helpers.ConvertTemplateToNamedParams(q)
+											metrics, err := helpers.ExtractMetrics(query, metricMap)
+											if err != nil {
+												//	return err
+											}
+											var metricResults []helpers.MetricResult
+											for _, metric := range metrics {
+												metricResults = append(metricResults, metricMap[metric])
+											}
+											cqi["query"], err = m.queryTransformer.TransformQuery(query, metricResults, attrMap)
+											if err != nil {
+												//	return err
+											}
+										}
 									}
 								}
 							}
@@ -1243,8 +1272,15 @@ func applyReplacementsToDashboard(
 						for _, piRaw := range prArr {
 							if pqi, ok := piRaw.(map[string]interface{}); ok {
 								if qRaw, exists2 := pqi["query"]; exists2 {
-									if q, ok2 := qRaw.(string); ok2 {
-										pqi["query"] = replaceInString(q, metricMap, attrMap, replacers)
+									if q, ok2 := qRaw.(string); ok2 && q != "" {
+										metrics, err := helpers.ExtractPromMetrics(q, metricMap)
+										if err != nil {
+											return err
+										}
+										pqi["query"], err = helpers.TransformPromQLQuery(q, metrics)
+										if err != nil {
+											return err
+										}
 									}
 								}
 							}
@@ -1253,6 +1289,7 @@ func applyReplacementsToDashboard(
 				}
 			}
 		}
+		return nil
 	}
 
 	// 2) Widgets array
@@ -1260,7 +1297,10 @@ func applyReplacementsToDashboard(
 		if wArr, ok := wArrRaw.([]interface{}); ok {
 			for _, wRaw := range wArr {
 				if wi, ok := wRaw.(map[string]interface{}); ok {
-					processWidget(wi)
+					err := processWidget(wi)
+					if err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -1271,14 +1311,19 @@ func applyReplacementsToDashboard(
 		if pm, ok := pmRaw.(map[string]interface{}); ok {
 			for _, vRaw := range pm {
 				if wi, ok := vRaw.(map[string]interface{}); ok {
-					processWidget(wi)
+					err := processWidget(wi)
+					if err != nil {
+						return err
+					}
 				}
 			}
 		}
 	}
+	return nil
 }
-func migrateRules(
-	metricMap map[string]metricResult,
+
+func (m *DashAlertsMigrator) migrateRules(
+	metricMap map[string]helpers.MetricResult,
 	attrMap map[string]string,
 	dbPath string,
 ) error {
@@ -1319,7 +1364,10 @@ func migrateRules(
 		}
 
 		// only mutate promQueries, chQueries, builder.queryData where dataSource=="metrics"
-		applyReplacementsToAlert(alertObj, metricMap, attrMap, replacers)
+		err := m.applyReplacementsToAlert(alertObj, metricMap, attrMap, replacers)
+		if err != nil {
+			return fmt.Errorf("error getting for alert-id: %v, for error  - %v", r.id, err)
+		}
 
 		// marshal back
 		newBytes, err := json.Marshal(alertObj)
@@ -1357,20 +1405,17 @@ func migrateRules(
 	return nil
 }
 
-func applyReplacementsToAlert(
+func (m *DashAlertsMigrator) applyReplacementsToAlert(
 	alert map[string]interface{},
-	metricMap map[string]metricResult,
+	metricMap map[string]helpers.MetricResult,
 	attrMap map[string]string,
-	replacers []struct {
-	re  *regexp.Regexp
-	dot string
-},
-) {
+	replacers []replacer,
+) error {
 	// helper to replace in a standalone SQL/PromQL string
 	replaceStr := func(s string) string {
 		// exact-match
 		if m, ok := metricMap[s]; ok {
-			return m.unNormMetricName
+			return m.UnNormMetricName
 		}
 		if dot, ok := attrMap[s]; ok {
 			return dot
@@ -1386,19 +1431,19 @@ func applyReplacementsToAlert(
 	// 1) Navigate to compositeQuery
 	condRaw, ok := alert["condition"]
 	if !ok {
-		return
+		return errors.New("alert condition not found in alert")
 	}
 	cond, ok := condRaw.(map[string]interface{})
 	if !ok {
-		return
+		return errors.New("alert condition not found in alert")
 	}
 	cqRaw, ok := cond["compositeQuery"]
 	if !ok {
-		return
+		return errors.New("alert composite query not found in alert")
 	}
 	cq, ok := cqRaw.(map[string]interface{})
 	if !ok {
-		return
+		return errors.New("alert composite query not found in alert")
 	}
 
 	// 2) promQueries
@@ -1406,8 +1451,15 @@ func applyReplacementsToAlert(
 		if pq, ok := pqRaw.(map[string]interface{}); ok {
 			for _, v := range pq {
 				if entry, ok := v.(map[string]interface{}); ok {
-					if qr, ok := entry["query"].(string); ok {
-						entry["query"] = replaceStr(qr)
+					if qr, ok := entry["query"].(string); ok && qr != "" {
+						metrics, err := helpers.ExtractPromMetrics(qr, metricMap)
+						if err != nil {
+							return err
+						}
+						entry["query"], err = helpers.TransformPromQLQuery(qr, metrics)
+						if err != nil {
+							return err
+						}
 					}
 				}
 			}
@@ -1419,8 +1471,22 @@ func applyReplacementsToAlert(
 		if chq, ok := chRaw.(map[string]interface{}); ok {
 			for _, v := range chq {
 				if entry, ok := v.(map[string]interface{}); ok {
-					if qr, ok := entry["query"].(string); ok {
-						entry["query"] = replaceStr(qr)
+					if q, ok := entry["query"].(string); ok {
+						if strings.Contains(q, "signoz_metrics") {
+							query := helpers.ConvertTemplateToNamedParams(q)
+							metrics, err := helpers.ExtractMetrics(query, metricMap)
+							if err != nil {
+								return err
+							}
+							var metricResults []helpers.MetricResult
+							for _, metric := range metrics {
+								metricResults = append(metricResults, metricMap[metric])
+							}
+							entry["query"], err = m.queryTransformer.TransformQuery(query, metricResults, attrMap)
+							if err != nil {
+								return err
+							}
+						}
 					}
 				}
 			}
@@ -1449,6 +1515,24 @@ func applyReplacementsToAlert(
 						if entry, ok := item.(map[string]interface{}); ok {
 							if ds, ok := entry["dataSource"].(string); ok && ds == "metrics" {
 								qd[i] = traverse(entry, metricMap, attrMap, replacers)
+							}
+						}
+					}
+				}
+			}
+			if qfRaw, exists := builder["queryFormulas"]; exists {
+				if qfArr, ok := qfRaw.([]interface{}); ok {
+					for _, fi := range qfArr {
+						if f, ok := fi.(map[string]interface{}); ok {
+							if exprRaw, exists2 := f["expression"]; exists2 {
+								if expr, ok2 := exprRaw.(string); ok2 {
+									f["expression"] = replaceInString(expr, metricMap, attrMap, replacers)
+								}
+							}
+							if lgRaw, exists2 := f["legend"]; exists2 {
+								if lg, ok2 := lgRaw.(string); ok2 {
+									f["legend"] = replaceInString(lg, metricMap, attrMap, replacers)
+								}
 							}
 						}
 					}
@@ -1497,10 +1581,13 @@ func applyReplacementsToAlert(
 						if err := json.Unmarshal([]byte(twice), &embedded); err == nil {
 							// apply same transformations to embedded.compositeQuery
 							if emap, ok := embedded.(map[string]interface{}); ok {
-								applyReplacementsToAlert(
+								err := m.applyReplacementsToAlert(
 									map[string]interface{}{"condition": map[string]interface{}{"compositeQuery": emap}},
 									metricMap, attrMap, replacers,
 								)
+								if err != nil {
+									return err
+								}
 								if newBytes, err := json.Marshal(emap); err == nil {
 									esc1 := url.QueryEscape(string(newBytes))
 									esc2 := url.QueryEscape(esc1)
@@ -1515,29 +1602,93 @@ func applyReplacementsToAlert(
 			}
 		}
 	}
+	return nil
 }
 
 // helper to replace inside a standalone SQL string
 func replaceInString(
 	s string,
-	metricMap map[string]metricResult,
+	metricMap map[string]helpers.MetricResult,
 	attrMap map[string]string,
-	replacers []struct {
-	re  *regexp.Regexp
-	dot string
-},
+	replacers []replacer,
 ) string {
-	// exact match
+	// exact-match shortcuts
 	if m, ok := metricMap[s]; ok {
-		return m.unNormMetricName
+		return m.UnNormMetricName
 	}
 	if dot, ok := attrMap[s]; ok {
 		return dot
 	}
-	// in-string
-	out := s
-	for _, r := range replacers {
-		out = r.re.ReplaceAllString(out, r.dot)
+
+	// Sort longest replacement tokens first
+	sort.Slice(replacers, func(i, j int) bool {
+		return len(replacers[i].dot) > len(replacers[j].dot)
+	})
+
+	// apply does one regex replacement with quote- and template-awareness
+	apply := func(r *regexp.Regexp, dot, in string) string {
+		var buf strings.Builder
+		last := 0
+
+		for _, loc := range r.FindAllStringIndex(in, -1) {
+			start, end := loc[0], loc[1]
+			buf.WriteString(in[last:start])
+
+			// peek at the characters just outside the match
+			var left, right byte
+			if start > 0 {
+				left = in[start-1]
+			}
+			if end < len(in) {
+				right = in[end]
+			}
+
+			// if touching a dot (part of a larger identifier),
+			// or already quoted/backticked, or inside {{…}}, emit raw
+			if left == '\'' || left == '`' || left == '.' ||
+				right == '\'' || right == '`' || right == '.' ||
+				(strings.LastIndex(in[:start], "{{") != -1 && strings.Index(in[end:], "}}") != -1) {
+				buf.WriteString(dot)
+			} else {
+				// otherwise wrap in backticks
+				buf.WriteString("`" + dot + "`")
+			}
+
+			last = end
+		}
+		buf.WriteString(in[last:])
+		return buf.String()
 	}
+
+	out := s
+	var usedMetricAttrs []map[string]struct {
+		re  *regexp.Regexp
+		dot string
+	}
+
+	// 1) replace metric names, track nested attrs
+	for _, r := range replacers {
+		newOut := apply(r.re, r.dot, out)
+		if newOut != out && r.metricName != nil {
+			usedMetricAttrs = append(usedMetricAttrs, r.metricName)
+		}
+		out = newOut
+	}
+
+	// 2) replace attributes (nested per-metric or global)
+	if len(usedMetricAttrs) > 0 {
+		for _, metricAttrMap := range usedMetricAttrs {
+			for _, sub := range metricAttrMap {
+				out = apply(sub.re, sub.dot, out)
+			}
+		}
+	} else {
+		for under, dot := range attrMap {
+			patt := `\b` + regexp.QuoteMeta(under) + `\b`
+			re := regexp.MustCompile(patt)
+			out = apply(re, dot, out)
+		}
+	}
+
 	return out
 }
