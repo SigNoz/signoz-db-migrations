@@ -990,7 +990,8 @@ func (m *DashAlertsMigrator) migrateDashboards(
 		// apply only the dashboard‐specific paths
 		err := m.applyReplacementsToDashboard(dash, metricMap, attrMap, replacers)
 		if err != nil {
-			return fmt.Errorf("error getting for dashboard-id: %v, for error  - %v", r.id, err)
+			log.Printf("error getting for dashboard-id: %v, for error  - %v", r.id, err)
+			continue
 		}
 
 		// marshal back
@@ -1366,7 +1367,8 @@ func (m *DashAlertsMigrator) migrateRules(
 		// only mutate promQueries, chQueries, builder.queryData where dataSource=="metrics"
 		err := m.applyReplacementsToAlert(alertObj, metricMap, attrMap, replacers)
 		if err != nil {
-			return fmt.Errorf("error getting for alert-id: %v, for error  - %v", r.id, err)
+			log.Printf("error getting for alert-id: %v, for error  - %v", r.id, err)
+			continue
 		}
 
 		// marshal back
@@ -1496,9 +1498,21 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 	// 4) builderQueries (METRIC_BASED_ALERT)
 	if bqRaw, ok := cq["builderQueries"]; ok {
 		if bq, ok := bqRaw.(map[string]interface{}); ok {
-			for key, v := range bq {
+			// First check if any query is metrics
+			hasMetrics := false
+			for _, v := range bq {
 				if entry, ok := v.(map[string]interface{}); ok {
 					if ds, ok := entry["dataSource"].(string); ok && ds == "metrics" {
+						hasMetrics = true
+						break
+					}
+				}
+			}
+
+			// If any metrics query found, run traverse() on every query
+			if hasMetrics {
+				for key, v := range bq {
+					if entry, ok := v.(map[string]interface{}); ok {
 						bq[key] = traverse(entry, metricMap, attrMap, replacers)
 					}
 				}
