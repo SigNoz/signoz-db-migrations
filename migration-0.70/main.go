@@ -1192,6 +1192,7 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 		oldKey string
 		newKey string
 	}
+	variabledMap := make(map[string]string)
 	// 1) Variables
 	if varsRaw, ok := dash["variables"]; ok {
 		if vars, ok := varsRaw.(map[string]interface{}); ok {
@@ -1228,6 +1229,7 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 						if sRaw, exists := vi[field]; exists {
 							if s, ok := sRaw.(string); ok && s != "" {
 								vi[field] = traverse(s, metricMap, attrMap, replacers)
+								variabledMap[s] = vi[field].(string)
 							}
 						}
 					}
@@ -1245,10 +1247,6 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 		}
 	}
 
-	variabledMap := make(map[string]string)
-	for _, kTr := range keysToRename {
-		variabledMap[kTr.oldKey] = kTr.newKey
-	}
 	variabledMapReplacer := buildReplacer(variabledMap)
 
 	// helper to process a single widget-like object
