@@ -1083,6 +1083,19 @@ func buildReplacers(
 	return reps
 }
 
+func buildReplacer(attrMap map[string]string) []replacer {
+	var reps []replacer
+	for under, dot := range attrMap {
+		patt := `\b` + regexp.QuoteMeta(under) + `\b`
+		reps = append(reps, replacer{
+			re:         regexp.MustCompile(patt),
+			dot:        dot,
+			metricName: nil, // No nested attrMap here
+		})
+	}
+	return reps
+}
+
 func traverse(
 	v interface{},
 	metricMap map[string]helpers.MetricResult,
@@ -1161,40 +1174,82 @@ func jsonEqual(a, b []byte) bool {
 	return reflect.DeepEqual(oa, ob)
 }
 
+func replacePlaceholders(query string, vars map[string]string) string {
+	for k, v := range vars {
+		placeholder := "$" + k
+		query = strings.ReplaceAll(query, placeholder, "$"+v)
+	}
+	return query
+}
+
 func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 	dash map[string]interface{},
 	metricMap map[string]helpers.MetricResult,
 	attrMap map[string]string,
 	replacers []replacer,
 ) error {
+	var keysToRename []struct {
+		oldKey string
+		newKey string
+	}
 	// 1) Variables
 	if varsRaw, ok := dash["variables"]; ok {
 		if vars, ok := varsRaw.(map[string]interface{}); ok {
-			for _, vRaw := range vars {
+
+			for oldKey, vRaw := range vars {
+				newKeyRaw := traverse(oldKey, metricMap, attrMap, replacers) // rename key using traverse
+				newKey, ok := newKeyRaw.(string)
+				if !ok {
+					newKey = oldKey
+				}
 				if vi, ok := vRaw.(map[string]interface{}); ok {
+					// Your existing per-variable value updates (queryValue, name fields) here
 					for _, field := range []string{"queryValue"} {
 						if sRaw, exists := vi[field]; exists {
 							if s, ok := sRaw.(string); ok && s != "" {
 								query := helpers.ConvertTemplateToNamedParams(s)
 								metrics, err := helpers.ExtractMetrics(query, metricMap)
 								if err != nil {
-									//return err
+									return err
 								}
 								var metricResults []helpers.MetricResult
 								for _, metric := range metrics {
 									metricResults = append(metricResults, metricMap[metric])
 								}
-								vi[field], err = m.queryTransformer.TransformQuery(query, metricResults, attrMap)
+								query, err = m.queryTransformer.TransformQuery(query, metricResults, attrMap)
 								if err != nil {
 									return err
 								}
+								vi[field] = replacePlaceholders(query, attrMap)
+							}
+						}
+					}
+					for _, field := range []string{"name"} {
+						if sRaw, exists := vi[field]; exists {
+							if s, ok := sRaw.(string); ok && s != "" {
+								vi[field] = traverse(s, metricMap, attrMap, replacers)
 							}
 						}
 					}
 				}
+				if newKey != oldKey {
+					keysToRename = append(keysToRename, struct{ oldKey, newKey string }{oldKey, newKey})
+				}
+			}
+
+			// Rename keys in the map after iteration
+			for _, kr := range keysToRename {
+				vars[kr.newKey] = vars[kr.oldKey]
+				delete(vars, kr.oldKey)
 			}
 		}
 	}
+
+	variabledMap := make(map[string]string)
+	for _, kTr := range keysToRename {
+		variabledMap[kTr.oldKey] = kTr.newKey
+	}
+	variabledMapReplacer := buildReplacer(variabledMap)
 
 	// helper to process a single widget-like object
 	processWidget := func(wi map[string]interface{}) error {
@@ -1212,6 +1267,8 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 										if dsRaw, exists2 := entry["dataSource"]; exists2 {
 											if ds, ok2 := dsRaw.(string); ok2 && ds == "metrics" {
 												qd[i] = traverse(entry, metricMap, attrMap, replacers)
+											} else {
+												qd[i] = traverse(entry, map[string]helpers.MetricResult{}, variabledMap, variabledMapReplacer)
 											}
 										}
 									}
