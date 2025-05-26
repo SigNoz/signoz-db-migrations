@@ -107,6 +107,10 @@ func commonPreRun(maxOpenConns int) (clickhouse.Conn, map[string]helpers.MetricR
 		"go_gc_duration_seconds":                                    "go_gc_duration_seconds",
 		"nginx_ingress_controller_ingress_upstream_latency_seconds": "nginx_ingress_controller_ingress_upstream_latency_seconds",
 	}
+	defaultAttr := map[string]string{
+		"k8s_node_name": "k8s.node.name",
+		"quantile":      "quantile",
+	}
 	notFoundMetricsMap := helpers.OverlayFromEnv(defaultMetrics, "NOT_FOUND_METRICS_MAP")
 	for _, m := range missing {
 		if v, ok := notFoundMetricsMap[m]; ok {
@@ -117,8 +121,7 @@ func commonPreRun(maxOpenConns int) (clickhouse.Conn, map[string]helpers.MetricR
 		}
 	}
 	// 2) build attribute map
-	defaultAttrs := map[string]string{"quantile": "quantile"}
-	notFoundAttrMap := helpers.OverlayFromEnv(defaultAttrs, "NOT_FOUND_ATTR_MAP")
+	notFoundAttrMap := helpers.OverlayFromEnv(defaultAttr, "NOT_FOUND_ATTR_MAP")
 	metricDetails, attrMap, err := buildMetricDetails(conn, metrics, notFoundAttrMap)
 	if err != nil {
 		conn.Close()
@@ -340,6 +343,10 @@ func buildMetricDetails(conn clickhouse.Conn, metrics map[string]string, notFoun
 		}
 	}
 
+	for k, v := range notFoundAttrMap {
+		allAttributeMap[k] = v
+	}
+
 	if len(notFound) > 0 {
 		return nil, nil, fmt.Errorf("attributes not found in any metrics: %v", notFound)
 	}
@@ -368,7 +375,7 @@ FROM signoz_metrics.distributed_metadata`)
 		if rows.Err() != nil {
 			return nil, nil, nil, rows.Err()
 		}
-		return nil, nil, nil, fmt.Errorf("no data for metric %q")
+		return nil, nil, nil, fmt.Errorf("no data for metric %q", query)
 	}
 
 	var resSlice, scopeSlice, attrSlice []string
@@ -1329,6 +1336,7 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 							if pqi, ok := piRaw.(map[string]interface{}); ok {
 								if qRaw, exists2 := pqi["query"]; exists2 {
 									if q, ok2 := qRaw.(string); ok2 && q != "" {
+										q = helpers.ConvertTemplateToNamedParams(q)
 										metrics, err := helpers.ExtractPromMetrics(q, metricMap)
 										if err != nil {
 											return err

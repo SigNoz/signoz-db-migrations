@@ -163,7 +163,7 @@ func MergeMaps(a, b map[string]string) map[string]string {
 
 func ConvertTemplateToNamedParams(query string) string {
 	// Match optional whitespace, optional leading dot, then the name
-	re := regexp.MustCompile(`{{\s*\.?(\w+)\s*}}`)
+	re := regexp.MustCompile(`{{\s*\.?([A-Za-z_]+)\s*}}`)
 	return re.ReplaceAllString(query, `$$$1`) // $$ => literal $, $1 => captured name
 }
 
