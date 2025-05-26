@@ -834,11 +834,11 @@ func checkAllAttributesOfTwoMetrics(
 	conn clickhouse.Conn,
 	metricNormTrue, metricNormFalse string,
 ) (
-// map each rawTrue key → all rawFalse keys with the same cleaned key
+	// map each rawTrue key → all rawFalse keys with the same cleaned key
 	normAttrsToUnNormAttrs map[string]string,
-// original keys present only in metricTrue
+	// original keys present only in metricTrue
 	keysPresentInNormMetric []string,
-// original keys present only in metricFalse
+	// original keys present only in metricFalse
 	keysPresentInUnNormMetric []string,
 	err error,
 ) {
@@ -997,7 +997,7 @@ func (m *DashAlertsMigrator) migrateDashboards(
 		// apply only the dashboard‐specific paths
 		err := m.applyReplacementsToDashboard(dash, metricMap, attrMap, replacers)
 		if err != nil {
-			log.Printf("error getting for dashboard-id: %v, for error  - %v", r.id, err)
+			log.Printf("error getting for dashboard-id: %v, for error  - %v for file name - %v", r.id, err, copyDB)
 			continue
 		}
 
@@ -1312,7 +1312,7 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 											query := helpers.ConvertTemplateToNamedParams(q)
 											metrics, err := helpers.ExtractMetrics(query, metricMap)
 											if err != nil {
-												//	return err
+												return err
 											}
 											var metricResults []helpers.MetricResult
 											for _, metric := range metrics {
@@ -1320,7 +1320,7 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 											}
 											cqi["query"], err = m.queryTransformer.TransformQuery(query, metricResults, attrMap)
 											if err != nil {
-												//	return err
+												return err
 											}
 										}
 									}
@@ -1517,6 +1517,7 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 			for _, v := range pq {
 				if entry, ok := v.(map[string]interface{}); ok {
 					if qr, ok := entry["query"].(string); ok && qr != "" {
+						qr = helpers.ConvertTemplateToNamedParams(qr)
 						metrics, err := helpers.ExtractPromMetrics(qr, metricMap)
 						if err != nil {
 							return err

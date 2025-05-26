@@ -51,18 +51,24 @@ func ExtractPromMetrics(query string, metricsSet map[string]MetricResult) ([]Met
 		return nil, err
 	}
 
+	metricsMap := make(map[string]string)
+
 	// Walk AST and collect metric names from VectorSelector nodes
 	parser.Inspect(expr, func(node parser.Node, path []parser.Node) error {
 		if vs, ok := node.(*parser.VectorSelector); ok {
-			metricsSet[vs.Name] = MetricResult{}
+			for _, m := range vs.LabelMatchers {
+				if m.Name == "__name__" {
+					metricsMap[m.Value] = m.Name
+				}
+			}
 		}
 		return nil
 	})
 
 	// Convert set to slice
 	metrics := make([]MetricResult, 0, len(metricsSet))
-	for _, m := range metricsSet {
-		metrics = append(metrics, m)
+	for k, _ := range metricsMap {
+		metrics = append(metrics, metricsSet[k])
 	}
 
 	return metrics, nil

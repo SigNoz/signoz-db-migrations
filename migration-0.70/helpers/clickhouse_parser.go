@@ -35,7 +35,7 @@ func (qt *QueryTransformer) TransformQuery(query string, metrics []MetricResult,
 	}
 
 	for _, stmt := range stmts {
-		visitor := &NameReplacementVisitor{mappings: mappings}
+		visitor := &NameReplacementVisitor{mappings: mappings, attrMap: attrMap}
 		if err := stmt.Accept(visitor); err != nil {
 			return "", fmt.Errorf("failed to transform query: %w", err)
 		}
@@ -55,6 +55,7 @@ func (qt *QueryTransformer) TransformQuery(query string, metrics []MetricResult,
 type NameReplacementVisitor struct {
 	parser.DefaultASTVisitor
 	mappings map[string]string
+	attrMap  map[string]string
 }
 
 func needsQuoting(_ string) bool {
@@ -63,6 +64,12 @@ func needsQuoting(_ string) bool {
 
 func (v *NameReplacementVisitor) transformIdentifier(ident *parser.Ident) {
 	if newName, exists := v.mappings[ident.Name]; exists {
+		ident.Name = newName
+		if needsQuoting(newName) {
+			ident.QuoteType = parser.BackTicks
+		}
+	}
+	if newName, exists := v.attrMap[ident.Name]; exists {
 		ident.Name = newName
 		if needsQuoting(newName) {
 			ident.QuoteType = parser.BackTicks
@@ -77,6 +84,9 @@ func (v *NameReplacementVisitor) VisitIdent(expr *parser.Ident) error {
 
 func (v *NameReplacementVisitor) VisitStringLiteral(expr *parser.StringLiteral) error {
 	if newName, exists := v.mappings[expr.Literal]; exists {
+		expr.Literal = newName
+	}
+	if newName, exists := v.attrMap[expr.Literal]; exists {
 		expr.Literal = newName
 	}
 	return nil
@@ -163,7 +173,7 @@ func MergeMaps(a, b map[string]string) map[string]string {
 
 func ConvertTemplateToNamedParams(query string) string {
 	// Match optional whitespace, optional leading dot, then the name
-	re := regexp.MustCompile(`{{\s*\.?([A-Za-z_]+)\s*}}`)
+	re := regexp.MustCompile(`{{\s*\.?([A-Za-z_][A-Za-z0-9_]*)\s*}}`)
 	return re.ReplaceAllString(query, `$$$1`) // $$ => literal $, $1 => captured name
 }
 
