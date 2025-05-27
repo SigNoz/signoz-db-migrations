@@ -834,11 +834,11 @@ func checkAllAttributesOfTwoMetrics(
 	conn clickhouse.Conn,
 	metricNormTrue, metricNormFalse string,
 ) (
-	// map each rawTrue key → all rawFalse keys with the same cleaned key
+// map each rawTrue key → all rawFalse keys with the same cleaned key
 	normAttrsToUnNormAttrs map[string]string,
-	// original keys present only in metricTrue
+// original keys present only in metricTrue
 	keysPresentInNormMetric []string,
-	// original keys present only in metricFalse
+// original keys present only in metricFalse
 	keysPresentInUnNormMetric []string,
 	err error,
 ) {
@@ -861,7 +861,13 @@ func checkAllAttributesOfTwoMetrics(
 	cleanKeysToOrigKeysUnNormAttrs := make(map[string]string, len(rawNormFalseAttrs))
 	for _, r := range rawNormFalseAttrs {
 		clean := scrubRe.ReplaceAllString(r, "")
-		cleanKeysToOrigKeysUnNormAttrs[clean] = r
+		if g, ok := cleanKeysToOrigKeysUnNormAttrs[clean]; ok {
+			if !strings.Contains(g, ".") && strings.Contains(r, ".") {
+				cleanKeysToOrigKeysUnNormAttrs[clean] = r
+			}
+		} else {
+			cleanKeysToOrigKeysUnNormAttrs[clean] = r
+		}
 	}
 
 	// 4) Extract cleaned key sets
@@ -889,7 +895,13 @@ func checkAllAttributesOfTwoMetrics(
 	normAttrsToUnNormAttrs = make(map[string]string, len(cleanKeysToOrigKeysNormAttrs))
 	for clean, rTrue := range cleanKeysToOrigKeysNormAttrs {
 		if rFalse, ok := cleanKeysToOrigKeysUnNormAttrs[clean]; ok {
-			normAttrsToUnNormAttrs[rTrue] = rFalse
+			if prev, exists := normAttrsToUnNormAttrs[rTrue]; exists {
+				if !strings.Contains(prev, ".") && strings.Contains(rFalse, ".") {
+					normAttrsToUnNormAttrs[rTrue] = rFalse
+				}
+			} else {
+				normAttrsToUnNormAttrs[rTrue] = rFalse
+			}
 		}
 	}
 
