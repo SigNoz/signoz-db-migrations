@@ -27,7 +27,7 @@ func TestTransformPromQLQuery(t *testing.T) {
 				NormMetricName:   "container_cpu_utilization",
 				UnNormMetricName: "container.cpu.utilization",
 			}},
-			want: `sum by (k8s.pod.name) (rate({"container.cpu.utilization","k8s.namespace.name"="ns"}[5m]))`,
+			want: `sum by ("k8s.pod.name") (rate({"container.cpu.utilization","k8s.namespace.name"="ns"}[5m]))`,
 		},
 		{
 			name:  "histogram_quantile underscore",
@@ -126,6 +126,16 @@ func TestTransformPromQLQuery(t *testing.T) {
 				UnNormMetricName:    "foo.metric",
 			}},
 			want: `{"foo.metric",a="b"} + on ("a") group_right ("b") {"bar.metric",c!~"d.*"}`,
+		},
+		{
+			name:  "binary matching on underscore",
+			input: `(system_memory_usage{k8s_cluster_name="$k8s_cluster_name",k8s_node_name="$k8s_node_name",state=~"buffered|cached|free|used"})`,
+			metricResult: []helpers.MetricResult{{
+				NormToUnNormAttrMap: map[string]string{"k8s_cluster_name": "k8s.cluster.name", "k8s_node_name": "k8s.node.name"},
+				NormMetricName:      "system_memory_usage",
+				UnNormMetricName:    "system.memory.usage",
+			}},
+			want: `({"system.memory.usage","k8s.cluster.name"="$k8s.cluster.name","k8s.node.name"="$k8s.node.name",state=~"buffered|cached|free|used"})`,
 		},
 	}
 

@@ -130,6 +130,11 @@ func TransformPromQLQuery(query string, metricResult []MetricResult) (string, er
 			}
 			if r, ok := repl[lm.Value]; ok {
 				lm.Value = r
+			} else if strings.HasPrefix(lm.Value, "$") {
+				key := lm.Value[1:]
+				if r2, ok2 := repl[key]; ok2 {
+					lm.Value = "$" + r2
+				}
 			}
 		}
 	}
@@ -155,7 +160,7 @@ func TransformPromQLQuery(query string, metricResult []MetricResult) (string, er
 			for i, lbl := range sel.Grouping {
 				key := string(lbl)
 				if r, ok := repl[key]; ok {
-					sel.Grouping[i] = r
+					sel.Grouping[i] = `"` + r + `"`
 				}
 			}
 
