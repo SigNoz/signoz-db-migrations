@@ -1334,6 +1334,13 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 											if err != nil {
 												return err
 											}
+										} else {
+											query := helpers.ConvertTemplateToNamedParams(q)
+											var err error
+											cqi["query"], err = m.queryTransformer.TransformQuery(query, []helpers.MetricResult{}, attrMap)
+											if err != nil {
+												return err
+											}
 										}
 									}
 								}
