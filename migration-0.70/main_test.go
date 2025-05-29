@@ -1,8 +1,9 @@
 package main
 
 import (
-	"migration-0.70/helpers"
 	"testing"
+
+	"migration-0.70/helpers"
 )
 
 // MetricResult holds mappings from underscore-style to dot-style names
@@ -141,6 +142,224 @@ func TestTransformPromQLQuery(t *testing.T) {
 
 	for _, tc := range tests {
 		got, err := helpers.TransformPromQLQuery(tc.input, tc.metricResult)
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", tc.name, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s:\n got:  %s\n want: %s", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestTransformClickHouseQuery(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		metricResult []helpers.MetricResult
+		want         string
+	}{
+		{
+			name:  "simple select with underscore metrics",
+			input: `SELECT value FROM signoz_metrics.distributed_samples_v4 WHERE metric_name = 'container_cpu_utilization' AND k8s_namespace_name = 'ns'`,
+			metricResult: []helpers.MetricResult{{
+				NormToUnNormAttrMap: map[string]string{
+					"container_cpu_utilization": "container.cpu.utilization",
+					"k8s_namespace_name":        "k8s.namespace.name",
+				},
+				NormMetricName:   "container_cpu_utilization",
+				UnNormMetricName: "container.cpu.utilization",
+			}},
+			want: "SELECT value FROM signoz_metrics.distributed_samples_v4 WHERE metric_name = 'container.cpu.utilization' AND `k8s.namespace.name` = 'ns'",
+		},
+		{
+			name:  "complex where clause with multiple conditions",
+			input: `SELECT * FROM signoz_metrics.distributed_time_series_v4 WHERE metric_name = 'http_requests_total' AND status_code = '200' AND service_name = 'api'`,
+			metricResult: []helpers.MetricResult{{
+				NormToUnNormAttrMap: map[string]string{
+					"http_requests_total": "http.requests.total",
+					"status_code":         "status.code",
+					"service_name":        "service.name",
+				},
+				NormMetricName:   "http_requests_total",
+				UnNormMetricName: "http.requests.total",
+			}},
+			want: "SELECT * FROM signoz_metrics.distributed_time_series_v4 WHERE metric_name = 'http.requests.total' AND `status.code` = '200' AND `service.name` = 'api'",
+		},
+		{
+			name:  "group by with underscore attributes",
+			input: `SELECT count(*) FROM signoz_metrics.distributed_samples_v4 WHERE metric_name = 'cpu_usage' GROUP BY k8s_pod_name, k8s_namespace_name`,
+			metricResult: []helpers.MetricResult{{
+				NormToUnNormAttrMap: map[string]string{
+					"cpu_usage":          "cpu.usage",
+					"k8s_pod_name":       "k8s.pod.name",
+					"k8s_namespace_name": "k8s.namespace.name",
+				},
+				NormMetricName:   "cpu_usage",
+				UnNormMetricName: "cpu.usage",
+			}},
+			want: "SELECT count(*) FROM signoz_metrics.distributed_samples_v4 WHERE metric_name = 'cpu.usage' GROUP BY `k8s.pod.name`, `k8s.namespace.name`",
+		},
+		{
+			name:  "order by with underscore attributes",
+			input: `SELECT * FROM signoz_metrics.distributed_time_series_v4 WHERE metric_name = 'memory_usage' ORDER BY k8s_node_name DESC`,
+			metricResult: []helpers.MetricResult{{
+				NormToUnNormAttrMap: map[string]string{
+					"memory_usage":  "memory.usage",
+					"k8s_node_name": "k8s.node.name",
+				},
+				NormMetricName:   "memory_usage",
+				UnNormMetricName: "memory.usage",
+			}},
+			want: "SELECT * FROM signoz_metrics.distributed_time_series_v4 WHERE metric_name = 'memory.usage' ORDER BY `k8s.node.name` DESC",
+		},
+		{
+			name:  "having clause with underscore attributes",
+			input: `SELECT k8s_pod_name, count(*) as cnt FROM signoz_metrics.distributed_samples_v4 WHERE metric_name = 'error_count' GROUP BY k8s_pod_name HAVING cnt > 100`,
+			metricResult: []helpers.MetricResult{{
+				NormToUnNormAttrMap: map[string]string{
+					"error_count":  "error.count",
+					"k8s_pod_name": "k8s.pod.name",
+				},
+				NormMetricName:   "error_count",
+				UnNormMetricName: "error.count",
+			}},
+			want: "SELECT `k8s.pod.name`, count(*) AS cnt FROM signoz_metrics.distributed_samples_v4 WHERE metric_name = 'error.count' GROUP BY `k8s.pod.name` HAVING cnt > 100",
+		},
+		{
+			name:  "join with underscore attributes",
+			input: `SELECT a.metric_name, b.k8s_pod_name FROM signoz_metrics.distributed_time_series_v4 a JOIN signoz_metrics.distributed_samples_v4 b ON a.k8s_pod_name = b.k8s_pod_name`,
+			metricResult: []helpers.MetricResult{{
+				NormToUnNormAttrMap: map[string]string{
+					"k8s_pod_name": "k8s.pod.name",
+				},
+			}},
+			want: "SELECT a.metric_name, b.`k8s.pod.name` FROM signoz_metrics.distributed_time_series_v4 AS a JOIN signoz_metrics.distributed_samples_v4 AS b ON a.`k8s.pod.name` = b.`k8s.pod.name`",
+		},
+		{
+			name:  "subquery with underscore attributes",
+			input: `SELECT * FROM signoz_metrics.distributed_time_series_v4 WHERE k8s_pod_name IN (SELECT k8s_pod_name FROM signoz_metrics.distributed_samples_v4 WHERE metric_name = 'cpu_usage')`,
+			metricResult: []helpers.MetricResult{{
+				NormToUnNormAttrMap: map[string]string{
+					"k8s_pod_name": "k8s.pod.name",
+					"cpu_usage":    "cpu.usage",
+				},
+				NormMetricName:   "cpu_usage",
+				UnNormMetricName: "cpu.usage",
+			}},
+			want: "SELECT * FROM signoz_metrics.distributed_time_series_v4 WHERE `k8s.pod.name` IN (SELECT `k8s.pod.name` FROM signoz_metrics.distributed_samples_v4 WHERE metric_name = 'cpu.usage')",
+		},
+		{
+			name:  "case statement with underscore attributes",
+			input: `SELECT CASE WHEN k8s_pod_name = 'api' THEN 'api_pod' ELSE 'other_pod' END as pod_type FROM signoz_metrics.distributed_time_series_v4`,
+			metricResult: []helpers.MetricResult{{
+				NormToUnNormAttrMap: map[string]string{
+					"k8s_pod_name": "k8s.pod.name",
+				},
+			}},
+			want: "SELECT CASE WHEN `k8s.pod.name` = 'api' THEN 'api_pod' ELSE 'other_pod' END AS pod_type FROM signoz_metrics.distributed_time_series_v4",
+		},
+		{
+			name:  "window function with underscore attributes",
+			input: `SELECT k8s_pod_name, avg(value) OVER (PARTITION BY k8s_namespace_name ORDER BY unix_milli) FROM signoz_metrics.distributed_samples_v4`,
+			metricResult: []helpers.MetricResult{{
+				NormToUnNormAttrMap: map[string]string{
+					"k8s_pod_name":       "k8s.pod.name",
+					"k8s_namespace_name": "k8s.namespace.name",
+				},
+			}},
+			want: "SELECT `k8s.pod.name`, avg(value) OVER ( PARTITION BY `k8s.namespace.name` ORDER BY unix_milli) FROM signoz_metrics.distributed_samples_v4",
+		},
+		{
+			name:  "array functions with underscore attributes",
+			input: `SELECT arrayJoin(k8s_pod_names) as pod_name FROM signoz_metrics.distributed_time_series_v4 WHERE metric_name = 'container_memory_usage'`,
+			metricResult: []helpers.MetricResult{{
+				NormToUnNormAttrMap: map[string]string{
+					"k8s_pod_names":          "k8s.pod.names",
+					"container_memory_usage": "container.memory.usage",
+				},
+				NormMetricName:   "container_memory_usage",
+				UnNormMetricName: "container.memory.usage",
+			}},
+			want: "SELECT arrayJoin(`k8s.pod.names`) AS pod_name FROM signoz_metrics.distributed_time_series_v4 WHERE metric_name = 'container.memory.usage'",
+		},
+		{
+			name: "clickhouse complex query",
+			input: `SELECT
+	env AS "Deployment Environment",
+	metric_name AS "Noramalized Metric Name",
+	service_name AS "Service Name",
+	if(ceiling(divide(min(diff),
+	1000)) > 86400000,
+	-1,
+	ceiling(divide(min(diff),
+	1000))) AS max_diff_in_secs
+FROM
+	(
+	SELECT
+		env,
+		metric_name,
+		service_name,
+		unix_milli - lagInFrame(unix_milli,
+		1,
+		0) OVER rate_window AS diff
+	FROM
+		signoz_metrics.distributed_samples_v4
+	INNER JOIN (
+		SELECT
+			DISTINCT env,
+			metric_name,
+			JSONExtractString(labels,
+			'service_name') AS service_name,
+			anyLast(fingerprint) AS fingerprint
+		FROM
+			signoz_metrics.time_series_v4_1day
+		WHERE
+			metric_name NOT LIKE 'signoz_%'
+			AND (unix_milli >= intDiv(123123123123,
+			86400000) * 86400000)
+			AND (unix_milli < 2311231231231)
+		GROUP BY
+			env,
+			metric_name,
+			service_name) AS filtered_time_series
+			USING fingerprint
+	WHERE
+		unix_milli >= (toUnixTimestamp(now() - toIntervalMinute(30)) * 1000) WINDOW rate_window as ( PARTITION BY fingerprint
+	ORDER BY
+		fingerprint,
+		unix_milli))
+WHERE
+	diff > 0
+GROUP BY
+	env,
+	metric_name,
+	service_name
+ORDER BY
+	env,
+	metric_name,
+	service_name`,
+			metricResult: []helpers.MetricResult{{
+				NormToUnNormAttrMap: map[string]string{
+					"service_name":           "service.name",
+					"container_memory_usage": "container.memory.usage",
+				},
+				NormMetricName:   "container_memory_usage",
+				UnNormMetricName: "container.memory.usage",
+			}},
+			want: "SELECT env AS \"Deployment Environment\", metric_name AS \"Noramalized Metric Name\", `service.name` AS \"Service Name\", if(ceiling(divide(min(diff), 1000)) > 86400000, -1, ceiling(divide(min(diff), 1000))) AS max_diff_in_secs FROM (SELECT env, metric_name, `service.name`, unix_milli - lagInFrame(unix_milli, 1, 0) OVER rate_window AS diff FROM signoz_metrics.distributed_samples_v4 INNER JOIN (SELECT DISTINCT env, metric_name, JSONExtractString(labels, 'service.name') AS `service.name`, anyLast(fingerprint) AS fingerprint FROM signoz_metrics.time_series_v4_1day WHERE metric_name NOT LIKE 'signoz_%' AND (unix_milli >= intDiv(123123123123, 86400000) * 86400000) AND (unix_milli < 2311231231231) GROUP BY env, metric_name, `service.name`) AS filtered_time_series USING fingerprint WHERE unix_milli >= (toUnixTimestamp(now() - toIntervalMinute(30)) * 1000) WINDOW rate_window as ( PARTITION BY fingerprint ORDER BY fingerprint, unix_milli)) WHERE diff > 0 GROUP BY env, metric_name, `service.name` ORDER BY env, metric_name, `service.name`",
+		},
+	}
+
+	for _, tc := range tests {
+		// Convert slice to map for NewQueryTransformer
+		metricMap := make(map[string]helpers.MetricResult)
+		for _, m := range tc.metricResult {
+			metricMap[m.NormMetricName] = m
+		}
+
+		transformer := helpers.NewQueryTransformer(metricMap)
+		got, err := transformer.TransformQuery(tc.input, tc.metricResult, make(map[string]string))
 		if err != nil {
 			t.Errorf("%s: unexpected error: %v", tc.name, err)
 			continue

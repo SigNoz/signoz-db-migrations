@@ -55,4 +55,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/AfterShip/clickhouse-sql-parser v0.4.9 => github.com/Signoz/clickhouse-sql-parser v1.0.0
+replace github.com/AfterShip/clickhouse-sql-parser v0.4.9 => github.com/Signoz/clickhouse-sql-parser v1.0.1
