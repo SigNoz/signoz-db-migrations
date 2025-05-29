@@ -1099,6 +1099,9 @@ func buildReplacers(
 		})
 	}
 
+	sort.Slice(reps, func(i, j int) bool {
+		return len(reps[i].dot) > len(reps[j].dot)
+	})
 	return reps
 }
 
@@ -1112,6 +1115,9 @@ func buildReplacer(attrMap map[string]string) []replacer {
 			metricName: nil, // No nested attrMap here
 		})
 	}
+	sort.Slice(reps, func(i, j int) bool {
+		return len(reps[i].dot) > len(reps[j].dot)
+	})
 	return reps
 }
 
@@ -1123,19 +1129,16 @@ func traverse(
 ) interface{} {
 	switch x := v.(type) {
 	case string:
-		// 1) exact match on whole string
+		// exact-match on whole string
 		if m, ok := metricMap[x]; ok {
 			return m.UnNormMetricName
 		}
 		if dot, ok := attrMap[x]; ok {
 			return dot
 		}
-		// 2) in-string replacement
-		s := x
-		for _, r := range replacers {
-			s = r.re.ReplaceAllString(s, r.dot)
-		}
-		return s
+
+		// in-string replacements, one per token
+		return applyReplacers(x, replacers)
 
 	case []interface{}:
 		for i, e := range x {
@@ -1299,12 +1302,12 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 									if f, ok := fi.(map[string]interface{}); ok {
 										if exprRaw, exists2 := f["expression"]; exists2 {
 											if expr, ok2 := exprRaw.(string); ok2 {
-												f["expression"] = replaceInString(expr, metricMap, attrMap, replacers)
+												f["expression"] = traverse(expr, metricMap, attrMap, replacers)
 											}
 										}
 										if lgRaw, exists2 := f["legend"]; exists2 {
 											if lg, ok2 := lgRaw.(string); ok2 {
-												f["legend"] = replaceInString(lg, metricMap, attrMap, replacers)
+												f["legend"] = traverse(lg, metricMap, attrMap, replacers)
 											}
 										}
 									}
@@ -1334,12 +1337,18 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 											if err != nil {
 												return err
 											}
+											if q, ok := cqi["legend"].(string); ok && q != "" {
+												cqi["legend"] = traverse(q, metricMap, attrMap, replacers)
+											}
 										} else {
 											query := helpers.ConvertTemplateToNamedParams(q)
 											var err error
 											cqi["query"], err = m.queryTransformer.TransformQuery(query, []helpers.MetricResult{}, attrMap)
 											if err != nil {
 												return err
+											}
+											if q, ok := cqi["legend"].(string); ok && q != "" {
+												cqi["legend"] = traverse(q, metricMap, attrMap, replacers)
 											}
 										}
 									}
@@ -1365,6 +1374,9 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 											return err
 										}
 									}
+								}
+								if q, ok := pqi["legend"].(string); ok && q != "" {
+									pqi["legend"] = traverse(q, metricMap, attrMap, replacers)
 								}
 							}
 						}
@@ -1496,21 +1508,6 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 	replacers []replacer,
 ) error {
 	// helper to replace in a standalone SQL/PromQL string
-	replaceStr := func(s string) string {
-		// exact-match
-		if m, ok := metricMap[s]; ok {
-			return m.UnNormMetricName
-		}
-		if dot, ok := attrMap[s]; ok {
-			return dot
-		}
-		// in-string
-		out := s
-		for _, r := range replacers {
-			out = r.re.ReplaceAllString(out, r.dot)
-		}
-		return out
-	}
 
 	// 1) Navigate to compositeQuery
 	condRaw, ok := alert["condition"]
@@ -1546,6 +1543,9 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 							return err
 						}
 					}
+					if q, ok := entry["legend"].(string); ok && q != "" {
+						entry["legend"] = traverse(q, metricMap, attrMap, replacers)
+					}
 				}
 			}
 		}
@@ -1572,6 +1572,9 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 								return err
 							}
 						}
+					}
+					if q, ok := entry["legend"].(string); ok && q != "" {
+						entry["legend"] = traverse(q, metricMap, attrMap, replacers)
 					}
 				}
 			}
@@ -1623,12 +1626,12 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 						if f, ok := fi.(map[string]interface{}); ok {
 							if exprRaw, exists2 := f["expression"]; exists2 {
 								if expr, ok2 := exprRaw.(string); ok2 {
-									f["expression"] = replaceInString(expr, metricMap, attrMap, replacers)
+									f["expression"] = traverse(expr, metricMap, attrMap, replacers)
 								}
 							}
 							if lgRaw, exists2 := f["legend"]; exists2 {
 								if lg, ok2 := lgRaw.(string); ok2 {
-									f["legend"] = replaceInString(lg, metricMap, attrMap, replacers)
+									f["legend"] = traverse(lg, metricMap, attrMap, replacers)
 								}
 							}
 						}
@@ -1642,10 +1645,10 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 	if annRaw, ok := alert["annotations"]; ok {
 		if ann, ok := annRaw.(map[string]interface{}); ok {
 			if d, ok := ann["description"].(string); ok {
-				ann["description"] = replaceStr(d)
+				ann["description"] = traverse(d, metricMap, attrMap, replacers)
 			}
 			if s, ok := ann["summary"].(string); ok {
-				ann["summary"] = replaceStr(s)
+				ann["summary"] = traverse(s, metricMap, attrMap, replacers)
 			}
 		}
 	}
@@ -1655,11 +1658,13 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 		if lbls, ok := lblsRaw.(map[string]interface{}); ok {
 			newLabels := make(map[string]interface{}, len(lbls))
 			for k, v := range lbls {
-				newKey := replaceStr(k)
+				newKey := traverse(k, metricMap, attrMap, replacers)
 				if sv, ok := v.(string); ok {
-					newLabels[newKey] = replaceStr(sv)
-				} else {
-					newLabels[newKey] = v
+					if sn, ok := newKey.(string); ok && sn != "" {
+						newLabels[sn] = traverse(sv, metricMap, attrMap, replacers)
+					} else {
+						newLabels[sn] = v
+					}
 				}
 			}
 			alert["labels"] = newLabels
@@ -1702,90 +1707,37 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 	return nil
 }
 
-// helper to replace inside a standalone SQL string
-func replaceInString(
-	s string,
-	metricMap map[string]helpers.MetricResult,
-	attrMap map[string]string,
-	replacers []replacer,
-) string {
-	// exact-match shortcuts
-	if m, ok := metricMap[s]; ok {
-		return m.UnNormMetricName
-	}
-	if dot, ok := attrMap[s]; ok {
-		return dot
-	}
+var tokenRe = regexp.MustCompile(`\b\w+\b`)
 
-	// Sort longest replacement tokens first
-	sort.Slice(replacers, func(i, j int) bool {
-		return len(replacers[i].dot) > len(replacers[j].dot)
-	})
+func applyReplacers(s string, replacers []replacer) string {
+	var sb strings.Builder
+	last := 0
 
-	// apply does one regex replacement with quote- and template-awareness
-	apply := func(r *regexp.Regexp, dot, in string) string {
-		var buf strings.Builder
-		last := 0
+	for _, loc := range tokenRe.FindAllStringIndex(s, -1) {
+		start, end := loc[0], loc[1]
+		token := s[start:end]
 
-		for _, loc := range r.FindAllStringIndex(in, -1) {
-			start, end := loc[0], loc[1]
-			buf.WriteString(in[last:start])
+		// write any non-token prefix
+		sb.WriteString(s[last:start])
 
-			// peek at the characters just outside the match
-			var left, right byte
-			if start > 0 {
-				left = in[start-1]
-			}
-			if end < len(in) {
-				right = in[end]
-			}
-
-			// if touching a dot (part of a larger identifier),
-			// or already quoted/backticked, or inside {{…}}, emit raw
-			if left == '\'' || left == '`' || left == '.' ||
-				right == '\'' || right == '`' || right == '.' ||
-				(strings.LastIndex(in[:start], "{{") != -1 && strings.Index(in[end:], "}}") != -1) {
-				buf.WriteString(dot)
-			} else {
-				// otherwise wrap in backticks
-				buf.WriteString("`" + dot + "`")
-			}
-
-			last = end
-		}
-		buf.WriteString(in[last:])
-		return buf.String()
-	}
-
-	out := s
-	var usedMetricAttrs []map[string]struct {
-		re  *regexp.Regexp
-		dot string
-	}
-
-	// 1) replace metric names, track nested attrs
-	for _, r := range replacers {
-		newOut := apply(r.re, r.dot, out)
-		if newOut != out && r.metricName != nil {
-			usedMetricAttrs = append(usedMetricAttrs, r.metricName)
-		}
-		out = newOut
-	}
-
-	// 2) replace attributes (nested per-metric or global)
-	if len(usedMetricAttrs) > 0 {
-		for _, metricAttrMap := range usedMetricAttrs {
-			for _, sub := range metricAttrMap {
-				out = apply(sub.re, sub.dot, out)
+		// find first matching replacer
+		replaced := false
+		for _, r := range replacers {
+			if r.re.MatchString(token) {
+				sb.WriteString(r.dot)
+				replaced = true
+				break
 			}
 		}
-	} else {
-		for under, dot := range attrMap {
-			patt := `\b` + regexp.QuoteMeta(under) + `\b`
-			re := regexp.MustCompile(patt)
-			out = apply(re, dot, out)
+
+		if !replaced {
+			sb.WriteString(token)
 		}
+
+		last = end
 	}
 
-	return out
+	// write trailing suffix
+	sb.WriteString(s[last:])
+	return sb.String()
 }
