@@ -182,12 +182,12 @@ func migrateMeta(maxOpenConns int, dbPath string) error {
 		return err
 	}
 	defer conn.Close()
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Printf("Migrate alerts & dashboards in %s? (yes): ", dbPath)
-	input, _ := reader.ReadString('\n')
-	if strings.TrimSpace(input) != "yes" {
-		return nil
-	}
+	//reader := bufio.NewReader(os.Stdin)
+	//fmt.Printf("Migrate alerts & dashboards in %s? (yes): ", dbPath)
+	//input, _ := reader.ReadString('\n')
+	//if strings.TrimSpace(input) != "yes" {
+	//	return nil
+	//}
 	//orig := dbPath
 	//copyDB := filepath.Join(filepath.Dir(orig), filepath.Base(orig)+".copy")
 	//if err := copyFile(orig, copyDB); err != nil {

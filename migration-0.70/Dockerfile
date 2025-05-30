@@ -3,11 +3,12 @@ FROM golang:1.22-alpine AS builder
 RUN apk --update add \
     util-linux-dev \
     build-base \
-    musl-dev
+    musl-dev \
+    sqlite-dev
 
 ARG TARGETPLATFORM
 
-ENV CGO_ENABLED=0
+ENV CGO_ENABLED=1
 ENV GOPATH=/go
 
 RUN export GOOS=$(echo ${TARGETPLATFORM} | cut -d / -f1) && \
