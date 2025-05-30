@@ -188,29 +188,29 @@ func migrateMeta(maxOpenConns int, dbPath string) error {
 	if strings.TrimSpace(input) != "yes" {
 		return nil
 	}
-	orig := dbPath
-	copyDB := filepath.Join(filepath.Dir(orig), filepath.Base(orig)+".copy")
-	if err := copyFile(orig, copyDB); err != nil {
-		return fmt.Errorf("failed to copy DB: %w", err)
-	}
-	fmt.Println("✅ copied DB to", copyDB)
+	//orig := dbPath
+	//copyDB := filepath.Join(filepath.Dir(orig), filepath.Base(orig)+".copy")
+	//if err := copyFile(orig, copyDB); err != nil {
+	//	return fmt.Errorf("failed to copy DB: %w", err)
+	//}
+	//fmt.Println("✅ copied DB to", dbPath)
 
 	transformer := helpers.NewQueryTransformer(metricDetails)
 	migrator := DashAlertsMigrator{queryTransformer: transformer}
 
-	if err := migrator.migrateDashboards(metricDetails, attrMap, copyDB); err != nil {
+	if err := migrator.migrateDashboards(metricDetails, attrMap, dbPath); err != nil {
 		return fmt.Errorf("dashboards migration failed: %w", err)
 	}
-	if err := migrator.migrateRules(metricDetails, attrMap, copyDB); err != nil {
+	if err := migrator.migrateRules(metricDetails, attrMap, dbPath); err != nil {
 		return fmt.Errorf("rules migration failed: %w", err)
 	}
-	if err := os.Remove(orig); err != nil {
-		return fmt.Errorf("remove original DB: %w", err)
-	}
-	if err := os.Rename(copyDB, orig); err != nil {
-		return fmt.Errorf("replace DB: %w", err)
-	}
-	log.Printf("Alerts & dashboards migration completed in %s", orig)
+	//if err := os.Remove(orig); err != nil {
+	//	return fmt.Errorf("remove original DB: %w", err)
+	//}
+	//if err := os.Rename(copyDB, orig); err != nil {
+	//	return fmt.Errorf("replace DB: %w", err)
+	//}
+	log.Printf("Alerts & dashboards migration completed in %s", dbPath)
 	return nil
 }
 
@@ -1210,6 +1210,11 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 	attrMap map[string]string,
 	replacers []replacer,
 ) error {
+
+	if migrated, ok := dash["dotMigrated"].(bool); ok && migrated {
+		return nil
+	}
+
 	var keysToRename []struct {
 		oldKey string
 		newKey string
@@ -1414,6 +1419,7 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 			}
 		}
 	}
+	dash["dotMigrated"] = true
 	return nil
 }
 
@@ -1507,6 +1513,11 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 	attrMap map[string]string,
 	replacers []replacer,
 ) error {
+
+	if migrated, ok := alert["dotMigrated"].(bool); ok && migrated {
+		return nil
+	}
+
 	// helper to replace in a standalone SQL/PromQL string
 
 	// 1) Navigate to compositeQuery
@@ -1704,6 +1715,8 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 			}
 		}
 	}
+
+	alert["dotMigrated"] = true
 	return nil
 }
 
