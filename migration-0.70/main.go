@@ -955,12 +955,11 @@ func diff(a, b []string) []string {
 
 func cappedCHContext(parent context.Context) context.Context {
 	return clickhouse.Context(parent,
-		clickhouse.WithSettings(clickhouse.Settings{
-			"max_memory_usage":                   2 * 500 * 1024 * 1024, // 1000 MB
-			"max_bytes_before_external_group_by": 100 * 1024 * 1024,     // 100 MB
-			"max_bytes_before_external_sort":     100 * 1024 * 1024,     // 100 MB
-			"max_execution_time":                 90,                    // 30 s
-			"max_threads":                        10,                    // 2 threads
+		clickhouse.WithSettings(clickhouse.Settings{"max_memory_usage": helpers.EnvOrInt("CH_MAX_MEMORY_USAGE", 2*500*1024*1024), // 1000 MB
+			"max_bytes_before_external_group_by": helpers.EnvOrInt("CH_MAX_BYTES_BEFORE_EXTERNAL_GROUP_BY", 100*1024*1024), // 100 MB
+			"max_bytes_before_external_sort":     helpers.EnvOrInt("CH_MAX_BYTES_BEFORE_EXTERNAL_SORT", 100*1024*1024),     // 100 MB
+			"max_execution_time":                 helpers.EnvOrInt("CH_MAX_EXECUTION_TIME", 90),                            // 90 s
+			"max_threads":                        helpers.EnvOrInt("CH_MAX_THREADS", 10),                                   // 10 threads
 		}),
 	)
 }
