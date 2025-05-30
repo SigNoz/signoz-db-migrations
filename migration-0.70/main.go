@@ -1027,10 +1027,10 @@ func (m *DashAlertsMigrator) migrateDashboards(
 
 	// apply updates in a transaction
 	tx, err := db.Begin()
-	defer tx.Rollback()
 	if err != nil {
 		return fmt.Errorf("begin tx failed: %w", err)
 	}
+	defer tx.Rollback()
 	stmt, err := tx.Prepare(`UPDATE dashboards SET data = ? WHERE id = ?`)
 	if err != nil {
 		return fmt.Errorf("prepare failed: %w", err)
@@ -1486,10 +1486,10 @@ func (m *DashAlertsMigrator) migrateRules(
 
 	// 4) apply updates in a transaction
 	tx, err := db.Begin()
-	defer tx.Rollback()
 	if err != nil {
 		return fmt.Errorf("begin tx failed: %w", err)
 	}
+	defer tx.Rollback()
 	stmt, err := tx.Prepare(`UPDATE rule SET data = ? WHERE id = ?`)
 	if err != nil {
 		return fmt.Errorf("prepare failed: %w", err)
