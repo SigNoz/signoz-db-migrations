@@ -111,6 +111,9 @@ func commonPreRun(maxOpenConns int) (clickhouse.Conn, map[string]helpers.MetricR
 		"k8s_node_name": "k8s.node.name",
 		"quantile":      "quantile",
 	}
+	skipMetrics := map[string]string{
+		"skipsampelMetrics": "true",
+	}
 	notFoundMetricsMap := helpers.OverlayFromEnv(defaultMetrics, "NOT_FOUND_METRICS_MAP")
 	for _, m := range missing {
 		if v, ok := notFoundMetricsMap[m]; ok {
@@ -118,6 +121,13 @@ func commonPreRun(maxOpenConns int) (clickhouse.Conn, map[string]helpers.MetricR
 		} else {
 			conn.Close()
 			return nil, nil, nil, fmt.Errorf("missing metrics map entry for %s", m)
+		}
+	}
+
+	skipMetrics = helpers.OverlayFromEnv(skipMetrics, "SKIP_METRICS_MAP")
+	for metric := range metrics {
+		if _, ok := skipMetrics[metric]; ok {
+			delete(metrics, metric)
 		}
 	}
 	// 2) build attribute map
