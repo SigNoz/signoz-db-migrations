@@ -111,6 +111,9 @@ func commonPreRun(maxOpenConns int) (clickhouse.Conn, map[string]helpers.MetricR
 		"k8s_node_name": "k8s.node.name",
 		"quantile":      "quantile",
 	}
+	skipMetrics := map[string]string{
+		"skipsampelMetrics": "true",
+	}
 	notFoundMetricsMap := helpers.OverlayFromEnv(defaultMetrics, "NOT_FOUND_METRICS_MAP")
 	for _, m := range missing {
 		if v, ok := notFoundMetricsMap[m]; ok {
@@ -118,6 +121,13 @@ func commonPreRun(maxOpenConns int) (clickhouse.Conn, map[string]helpers.MetricR
 		} else {
 			conn.Close()
 			return nil, nil, nil, fmt.Errorf("missing metrics map entry for %s", m)
+		}
+	}
+
+	skipMetrics = helpers.OverlayFromEnv(skipMetrics, "SKIP_METRICS_MAP")
+	for metric := range metrics {
+		if _, ok := skipMetrics[metric]; ok {
+			delete(metrics, metric)
 		}
 	}
 	// 2) build attribute map
@@ -955,12 +965,11 @@ func diff(a, b []string) []string {
 
 func cappedCHContext(parent context.Context) context.Context {
 	return clickhouse.Context(parent,
-		clickhouse.WithSettings(clickhouse.Settings{
-			"max_memory_usage":                   2 * 500 * 1024 * 1024, // 1000 MB
-			"max_bytes_before_external_group_by": 100 * 1024 * 1024,     // 100 MB
-			"max_bytes_before_external_sort":     100 * 1024 * 1024,     // 100 MB
-			"max_execution_time":                 90,                    // 30 s
-			"max_threads":                        10,                    // 2 threads
+		clickhouse.WithSettings(clickhouse.Settings{"max_memory_usage": helpers.EnvOrInt("CH_MAX_MEMORY_USAGE", 2*500*1024*1024), // 1000 MB
+			"max_bytes_before_external_group_by": helpers.EnvOrInt("CH_MAX_BYTES_BEFORE_EXTERNAL_GROUP_BY", 100*1024*1024), // 100 MB
+			"max_bytes_before_external_sort":     helpers.EnvOrInt("CH_MAX_BYTES_BEFORE_EXTERNAL_SORT", 100*1024*1024),     // 100 MB
+			"max_execution_time":                 helpers.EnvOrInt("CH_MAX_EXECUTION_TIME", 90),                            // 90 s
+			"max_threads":                        helpers.EnvOrInt("CH_MAX_THREADS", 10),                                   // 10 threads
 		}),
 	)
 }
@@ -1030,6 +1039,7 @@ func (m *DashAlertsMigrator) migrateDashboards(
 	if err != nil {
 		return fmt.Errorf("begin tx failed: %w", err)
 	}
+	defer tx.Rollback()
 	stmt, err := tx.Prepare(`UPDATE dashboards SET data = ? WHERE id = ?`)
 	if err != nil {
 		return fmt.Errorf("prepare failed: %w", err)
@@ -1488,6 +1498,7 @@ func (m *DashAlertsMigrator) migrateRules(
 	if err != nil {
 		return fmt.Errorf("begin tx failed: %w", err)
 	}
+	defer tx.Rollback()
 	stmt, err := tx.Prepare(`UPDATE rule SET data = ? WHERE id = ?`)
 	if err != nil {
 		return fmt.Errorf("prepare failed: %w", err)
