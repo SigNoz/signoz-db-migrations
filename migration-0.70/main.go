@@ -844,11 +844,11 @@ func checkAllAttributesOfTwoMetrics(
 	conn clickhouse.Conn,
 	metricNormTrue, metricNormFalse string,
 ) (
-// map each rawTrue key → all rawFalse keys with the same cleaned key
+	// map each rawTrue key → all rawFalse keys with the same cleaned key
 	normAttrsToUnNormAttrs map[string]string,
-// original keys present only in metricTrue
+	// original keys present only in metricTrue
 	keysPresentInNormMetric []string,
-// original keys present only in metricFalse
+	// original keys present only in metricFalse
 	keysPresentInUnNormMetric []string,
 	err error,
 ) {
@@ -990,7 +990,7 @@ func (m *DashAlertsMigrator) migrateDashboards(
 	replacers := buildReplacers(metricMap, attrMap)
 
 	// select each dashboard row
-	rows, err := db.Query(`SELECT id, data FROM dashboards`)
+	rows, err := db.Query(`SELECT id, data FROM dashboard`)
 	if err != nil {
 		return fmt.Errorf("query failed: %w", err)
 	}
@@ -1040,7 +1040,7 @@ func (m *DashAlertsMigrator) migrateDashboards(
 		return fmt.Errorf("begin tx failed: %w", err)
 	}
 	defer tx.Rollback()
-	stmt, err := tx.Prepare(`UPDATE dashboards SET data = ? WHERE id = ?`)
+	stmt, err := tx.Prepare(`UPDATE dashboard SET data = ? WHERE id = ?`)
 	if err != nil {
 		return fmt.Errorf("prepare failed: %w", err)
 	}
