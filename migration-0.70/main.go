@@ -230,6 +230,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: %s <migrate-data|migrate-meta> [flags]\n", os.Args[0])
 		os.Exit(1)
 	}
+	logger, err := zap.NewProduction()
+	if err != nil {
+		panic(err)
+	}
+	zap.ReplaceGlobals(logger)
 	cmd := os.Args[1]
 	switch cmd {
 	case "migrate-data":
