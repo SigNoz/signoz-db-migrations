@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"go.uber.org/zap"
 	"io"
 	"log"
 	"net/url"
@@ -101,12 +102,7 @@ func commonPreRun(maxOpenConns int) (clickhouse.Conn, map[string]helpers.MetricR
 		return nil, nil, nil, fmt.Errorf("error getting metric names: %w", err)
 	}
 	// overlay fallback maps
-	defaultMetrics := map[string]string{
-		"certmanager_http_acme_client_request_duration_seconds":     "certmanager_http_acme_client_request_duration_seconds",
-		"redis_latency_percentiles_usec":                            "redis_latency_percentiles_usec",
-		"go_gc_duration_seconds":                                    "go_gc_duration_seconds",
-		"nginx_ingress_controller_ingress_upstream_latency_seconds": "nginx_ingress_controller_ingress_upstream_latency_seconds",
-	}
+	defaultMetrics := map[string]string{}
 	defaultAttr := map[string]string{
 		"k8s_node_name": "k8s.node.name",
 		"quantile":      "quantile",
@@ -115,13 +111,18 @@ func commonPreRun(maxOpenConns int) (clickhouse.Conn, map[string]helpers.MetricR
 		"skipsampelMetrics": "true",
 	}
 	notFoundMetricsMap := helpers.OverlayFromEnv(defaultMetrics, "NOT_FOUND_METRICS_MAP")
+	var missingMetrics []string
 	for _, m := range missing {
 		if v, ok := notFoundMetricsMap[m]; ok {
 			metrics[m] = v
 		} else {
 			conn.Close()
-			return nil, nil, nil, fmt.Errorf("missing metrics map entry for %s", m)
+			missingMetrics = append(missingMetrics, m)
 		}
+	}
+
+	if len(missingMetrics) > 0 {
+		return nil, nil, nil, fmt.Errorf("missing metrics: %s", strings.Join(missingMetrics, ","))
 	}
 
 	skipMetrics = helpers.OverlayFromEnv(skipMetrics, "SKIP_METRICS_MAP")
@@ -220,7 +221,7 @@ func migrateMeta(maxOpenConns int, dbPath string) error {
 	//if err := os.Rename(copyDB, orig); err != nil {
 	//	return fmt.Errorf("replace DB: %w", err)
 	//}
-	log.Printf("Alerts & dashboards migration completed in %s", dbPath)
+	//log.Printf("Alerts & dashboards migration completed in %s", dbPath)
 	return nil
 }
 
@@ -229,6 +230,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: %s <migrate-data|migrate-meta> [flags]\n", os.Args[0])
 		os.Exit(1)
 	}
+	logger, err := zap.NewProduction()
+	if err != nil {
+		panic(err)
+	}
+	zap.ReplaceGlobals(logger)
 	cmd := os.Args[1]
 	switch cmd {
 	case "migrate-data":
@@ -236,10 +242,10 @@ func main() {
 		workers := fs.Int("workers", helpers.EnvOrInt("MIGRATE_WORKERS", 4), "hour-windows to process")
 		maxOpen := fs.Int("max-open-conns", helpers.EnvOrInt("MIGRATE_MAX_OPEN_CONNS", 16), "ClickHouse pool size")
 		if err := fs.Parse(os.Args[2:]); err != nil {
-			log.Fatalf("failed to parse flags for %s: %v", cmd, err)
+			zap.L().Error(fmt.Sprintf("failed to parse flags for %s: %v", cmd, err))
 		}
 		if err := migrateHighRetention(*maxOpen, *workers); err != nil {
-			log.Fatalf("data migration failed: %v", err)
+			zap.L().Error(fmt.Sprintf("data migration failed: %v", err))
 		}
 
 	case "migrate-meta":
@@ -247,10 +253,10 @@ func main() {
 		maxOpen := fs.Int("max-open-conns", helpers.EnvOrInt("MIGRATE_MAX_OPEN_CONNS", 16), "ClickHouse pool size")
 		dbp := fs.String("db-path", helpers.EnvOr("SQL_DB_PATH", "./signoz.db"), "SQLite DB path")
 		if err := fs.Parse(os.Args[2:]); err != nil {
-			log.Fatalf("failed to parse flags for %s: %v", cmd, err)
+			zap.L().Error(fmt.Sprintf("failed to parse flags for %s: %v", cmd, err))
 		}
 		if err := migrateMeta(*maxOpen, *dbp); err != nil {
-			log.Fatalf("alerts/dashboard migration failed: %v", err)
+			zap.L().Error(fmt.Sprintf("alerts/dashboard migration failed: %v", err))
 		}
 
 	default:
@@ -306,7 +312,7 @@ func buildMetricDetails(conn clickhouse.Conn, metrics map[string]string, notFoun
 	for res := range results {
 		metricDetails[res.NormMetricName] = res
 		if res.Err != nil {
-			log.Fatalf("error checking metric %s → %s: %v", res.NormMetricName, res.UnNormMetricName, res.Err)
+			return nil, nil, fmt.Errorf("error checking metric %s → %s: %v", res.NormMetricName, res.UnNormMetricName, res.Err)
 		} else {
 			//log.Printf("metrics name %s -> %s", res.key, res.name) // uncomment this line to check for valid metrics.
 		}
@@ -326,10 +332,10 @@ func buildMetricDetails(conn clickhouse.Conn, metrics map[string]string, notFoun
 
 			// still log the details for visibility
 			if len(res.NormAttributes) > 0 {
-				log.Printf("extra attributes in underscore metric %s: %v", res.NormMetricName, res.NormAttributes)
+				//log.Printf("extra attributes in underscore metric %s: %v", res.NormMetricName, res.NormAttributes)
 			}
 			if len(res.UnNormAttributes) > 0 {
-				log.Printf("extra attributes in dot metric %s: %v", res.UnNormMetricName, res.UnNormAttributes)
+				//log.Printf("extra attributes in dot metric %s: %v", res.UnNormMetricName, res.UnNormAttributes)
 			}
 		}
 	}
@@ -363,7 +369,7 @@ func buildMetricDetails(conn clickhouse.Conn, metrics map[string]string, notFoun
 
 	//for not found metric
 
-	log.Printf("metrics ready for conversion: %+v", validMetrics)
+	//log.Printf("metrics ready for conversion: %+v", validMetrics)
 
 	return metricDetails, allAttributeMap, nil
 }
@@ -377,7 +383,7 @@ FROM signoz_metrics.distributed_metadata`)
 	ctx := cappedCHContext(context.Background())
 	rows, err := conn.Query(ctx, query)
 	if err != nil {
-		log.Fatalf("error getting all metric attributes: %v", err)
+		return nil, nil, nil, fmt.Errorf("error getting all metric attributes: %v", err)
 	}
 	defer rows.Close()
 
@@ -678,7 +684,7 @@ func fetchAndInsertTimeSeriesV4(ctx context.Context, conn clickhouse.Conn, start
 			return fmt.Errorf("final samples flush: %w", err)
 		}
 	}
-	log.Printf("migration success for windows start: %v, and end: %v", start, end)
+	//log.Printf("migration success for windows start: %v, and end: %v", start, end)
 	return nil
 }
 
@@ -776,7 +782,7 @@ func GetCorrespondingNormalizedMetrics(
 	conn clickhouse.Conn,
 ) (map[string]string, []string, error) {
 	// 1) Fetch all distinct metric names + normalized flags
-	query := "SELECT DISTINCT metric_name, toUInt8(__normalized) FROM %s.%s"
+	query := "SELECT DISTINCT metric_name, type, toUInt8(__normalized) FROM %s.%s"
 	chContext := cappedCHContext(context.Background())
 	rows, err := conn.Query(
 		chContext,
@@ -791,15 +797,17 @@ func GetCorrespondingNormalizedMetrics(
 	type pair struct {
 		normalizedName   string
 		unnormalizedName string
+		metricType       string
 	}
 	cleanedMap := make(map[string]*pair)
 
 	for rows.Next() {
 		var (
 			metricName string
+			metricType string
 			normalized uint8
 		)
-		if err := rows.Scan(&metricName, &normalized); err != nil {
+		if err := rows.Scan(&metricName, &metricType, &normalized); err != nil {
 			return nil, nil, err
 		}
 		sanitized := sanitize(metricName)
@@ -808,6 +816,7 @@ func GetCorrespondingNormalizedMetrics(
 			p = &pair{}
 			cleanedMap[sanitized] = p
 		}
+		p.metricType = metricType
 		if normalized != 0 {
 			// this is the “normalized” version
 			p.normalizedName = metricName
@@ -822,8 +831,14 @@ func GetCorrespondingNormalizedMetrics(
 	}
 	// 3) Build the result: normalized → un-normalized (or "" if missing)
 	result := make(map[string]string, len(cleanedMap))
-	for _, p := range cleanedMap {
+	for k, p := range cleanedMap {
 		if p.normalizedName != "" {
+			if p.unnormalizedName == "" && p.metricType == "Summary" {
+				if cleaned, ok := cleanedMap[k+"quantile"]; ok {
+					result[p.normalizedName] = cleaned.unnormalizedName
+					cleanedMap[k].unnormalizedName = cleaned.unnormalizedName
+				}
+			}
 			result[p.normalizedName] = p.unnormalizedName
 		}
 	}
@@ -844,11 +859,11 @@ func checkAllAttributesOfTwoMetrics(
 	conn clickhouse.Conn,
 	metricNormTrue, metricNormFalse string,
 ) (
-	// map each rawTrue key → all rawFalse keys with the same cleaned key
+// map each rawTrue key → all rawFalse keys with the same cleaned key
 	normAttrsToUnNormAttrs map[string]string,
-	// original keys present only in metricTrue
+// original keys present only in metricTrue
 	keysPresentInNormMetric []string,
-	// original keys present only in metricFalse
+// original keys present only in metricFalse
 	keysPresentInUnNormMetric []string,
 	err error,
 ) {
@@ -1011,14 +1026,14 @@ func (m *DashAlertsMigrator) migrateDashboards(
 		// parse into a map so we can selectively mutate
 		var dash map[string]interface{}
 		if err := json.Unmarshal(r.data, &dash); err != nil {
-			log.Printf("⚠️ skipping dashboard %v: invalid JSON", r.id)
+			zap.L().Error(fmt.Sprintf("⚠️ skipping dashboard %v: invalid JSON", r.id))
 			continue
 		}
 
 		// apply only the dashboard‐specific paths
 		err := m.applyReplacementsToDashboard(dash, metricMap, attrMap, replacers)
 		if err != nil {
-			log.Printf("error getting for dashboard-id: %v, for error  - %v for file name - %v", r.id, err, copyDB)
+			zap.L().Error(fmt.Sprintf("error getting for dashboard-id: %v, for error  - %v for file name - %v", r.id, err, copyDB))
 			continue
 		}
 
@@ -1470,14 +1485,14 @@ func (m *DashAlertsMigrator) migrateRules(
 		// parse into a map so we can selectively mutate
 		var alertObj map[string]interface{}
 		if err := json.Unmarshal(r.data, &alertObj); err != nil {
-			log.Printf("⚠️ skipping rule %v: invalid JSON", r.id)
+			zap.L().Error(fmt.Sprintf("⚠️ skipping rule %v: invalid JSON", r.id))
 			continue
 		}
 
 		// only mutate promQueries, chQueries, builder.queryData where dataSource=="metrics"
 		err := m.applyReplacementsToAlert(alertObj, metricMap, attrMap, replacers)
 		if err != nil {
-			log.Printf("error getting for alert-id: %v, for error  - %v", r.id, err)
+			zap.L().Error(fmt.Sprintf("error getting for alert-id: %v, for error  - %v", r.id, err))
 			continue
 		}
 
