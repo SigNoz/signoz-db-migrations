@@ -860,11 +860,11 @@ func checkAllAttributesOfTwoMetrics(
 	conn clickhouse.Conn,
 	metricNormTrue, metricNormFalse string,
 ) (
-	// map each rawTrue key → all rawFalse keys with the same cleaned key
+// map each rawTrue key → all rawFalse keys with the same cleaned key
 	normAttrsToUnNormAttrs map[string]string,
-	// original keys present only in metricTrue
+// original keys present only in metricTrue
 	keysPresentInNormMetric []string,
-	// original keys present only in metricFalse
+// original keys present only in metricFalse
 	keysPresentInUnNormMetric []string,
 	err error,
 ) {
@@ -1304,10 +1304,7 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 	// helper to process a single widget-like object
 	processWidget := func(wi map[string]interface{}) error {
 		// Create a deep copy of the widget to avoid partial modifications
-		wiCopy := make(map[string]interface{})
-		for k, v := range wi {
-			wiCopy[k] = v
-		}
+		wiCopy := deepCopy(wi).(map[string]interface{})
 
 		// A) builder.queryData
 		if queryRaw, ok := wiCopy["query"]; ok {
@@ -1457,6 +1454,25 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 	}
 	dash["dotMigrated"] = true
 	return nil
+}
+
+func deepCopy(v interface{}) interface{} {
+	switch x := v.(type) {
+	case map[string]interface{}:
+		newMap := make(map[string]interface{}, len(x))
+		for k, v := range x {
+			newMap[k] = deepCopy(v)
+		}
+		return newMap
+	case []interface{}:
+		newSlice := make([]interface{}, len(x))
+		for i, v := range x {
+			newSlice[i] = deepCopy(v)
+		}
+		return newSlice
+	default:
+		return v
+	}
 }
 
 func (m *DashAlertsMigrator) migrateRules(
