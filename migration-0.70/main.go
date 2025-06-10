@@ -8,7 +8,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"go.uber.org/zap"
 	"io"
 	"log"
 	"net/url"
@@ -19,6 +18,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"go.uber.org/zap"
 
 	clickhouse "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -818,7 +819,7 @@ func GetCorrespondingNormalizedMetrics(
 		}
 		p.metricType = metricType
 		if normalized != 0 {
-			// this is the “normalized” version
+			// this is the "normalized" version
 			p.normalizedName = metricName
 		} else {
 			// this is the original (un-normalized) version
@@ -859,11 +860,11 @@ func checkAllAttributesOfTwoMetrics(
 	conn clickhouse.Conn,
 	metricNormTrue, metricNormFalse string,
 ) (
-// map each rawTrue key → all rawFalse keys with the same cleaned key
+	// map each rawTrue key → all rawFalse keys with the same cleaned key
 	normAttrsToUnNormAttrs map[string]string,
-// original keys present only in metricTrue
+	// original keys present only in metricTrue
 	keysPresentInNormMetric []string,
-// original keys present only in metricFalse
+	// original keys present only in metricFalse
 	keysPresentInUnNormMetric []string,
 	err error,
 ) {
@@ -1030,7 +1031,7 @@ func (m *DashAlertsMigrator) migrateDashboards(
 			continue
 		}
 
-		// apply only the dashboard‐specific paths
+		// apply only the dashboard-specific paths
 		err := m.applyReplacementsToDashboard(dash, metricMap, attrMap, replacers)
 		if err != nil {
 			zap.L().Error(fmt.Sprintf("error getting for dashboard-id: %v, for error  - %v for file name - %v", r.id, err, copyDB))
@@ -1245,10 +1246,9 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 		newKey string
 	}
 	variabledMap := make(map[string]string)
-	// 1) Variables
+	// 1) Variables - if this fails, return error immediately
 	if varsRaw, ok := dash["variables"]; ok {
 		if vars, ok := varsRaw.(map[string]interface{}); ok {
-
 			for oldKey, vRaw := range vars {
 				newKeyRaw := traverse(oldKey, metricMap, attrMap, replacers) // rename key using traverse
 				newKey, ok := newKeyRaw.(string)
@@ -1263,7 +1263,7 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 								query := helpers.ConvertTemplateToNamedParams(s)
 								metrics, err := helpers.ExtractMetrics(query, metricMap)
 								if err != nil {
-									return err
+									return fmt.Errorf("error processing variables: %w", err)
 								}
 								var metricResults []helpers.MetricResult
 								for _, metric := range metrics {
@@ -1271,7 +1271,7 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 								}
 								query, err = m.queryTransformer.TransformQuery(query, metricResults, attrMap)
 								if err != nil {
-									return err
+									return fmt.Errorf("error processing variables: %w", err)
 								}
 								vi[field] = replacePlaceholders(query, attrMap)
 							}
@@ -1303,8 +1303,11 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 
 	// helper to process a single widget-like object
 	processWidget := func(wi map[string]interface{}) error {
+		// Create a deep copy of the widget to avoid partial modifications
+		wiCopy := deepCopy(wi).(map[string]interface{})
+
 		// A) builder.queryData
-		if queryRaw, ok := wi["query"]; ok {
+		if queryRaw, ok := wiCopy["query"]; ok {
 			if qObj, ok := queryRaw.(map[string]interface{}); ok {
 				// builder
 				if builderRaw, ok := qObj["builder"]; ok {
@@ -1414,31 +1417,36 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 				}
 			}
 		}
+
+		// If we got here without errors, apply all changes to the original widget
+		for k, v := range wiCopy {
+			wi[k] = v
+		}
 		return nil
 	}
 
-	// 2) Widgets array
+	// 2) Widgets array - continue even if some panels fail
 	if wArrRaw, ok := dash["widgets"]; ok {
 		if wArr, ok := wArrRaw.([]interface{}); ok {
 			for _, wRaw := range wArr {
 				if wi, ok := wRaw.(map[string]interface{}); ok {
-					err := processWidget(wi)
-					if err != nil {
-						return err
+					if err := processWidget(wi); err != nil {
+						zap.L().Error(fmt.Sprintf("⚠️ skipping widget due to error: %v", err))
+						continue
 					}
 				}
 			}
 		}
 	}
 
-	// 3) panelMap
+	// 3) panelMap - continue even if some panels fail
 	if pmRaw, ok := dash["panelMap"]; ok {
 		if pm, ok := pmRaw.(map[string]interface{}); ok {
 			for _, vRaw := range pm {
 				if wi, ok := vRaw.(map[string]interface{}); ok {
-					err := processWidget(wi)
-					if err != nil {
-						return err
+					if err := processWidget(wi); err != nil {
+						zap.L().Error(fmt.Sprintf("⚠️ skipping panel due to error: %v", err))
+						continue
 					}
 				}
 			}
@@ -1446,6 +1454,25 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 	}
 	dash["dotMigrated"] = true
 	return nil
+}
+
+func deepCopy(v interface{}) interface{} {
+	switch x := v.(type) {
+	case map[string]interface{}:
+		newMap := make(map[string]interface{}, len(x))
+		for k, v := range x {
+			newMap[k] = deepCopy(v)
+		}
+		return newMap
+	case []interface{}:
+		newSlice := make([]interface{}, len(x))
+		for i, v := range x {
+			newSlice[i] = deepCopy(v)
+		}
+		return newSlice
+	default:
+		return v
+	}
 }
 
 func (m *DashAlertsMigrator) migrateRules(

@@ -286,68 +286,68 @@ func TestTransformClickHouseQuery(t *testing.T) {
 		{
 			name: "clickhouse complex query",
 			input: `SELECT
-	env AS "Deployment Environment",
-	metric_name AS "Noramalized Metric Name",
-	service_name AS "Service Name",
-	if(ceiling(divide(min(diff),
-	1000)) > 86400000,
-	-1,
-	ceiling(divide(min(diff),
-	1000))) AS max_diff_in_secs
-FROM
-	(
-	SELECT
-		env,
-		metric_name,
-		service_name,
-		unix_milli - lagInFrame(unix_milli,
-		1,
-		0) OVER rate_window AS diff
-	FROM
-		signoz_metrics.distributed_samples_v4
-	INNER JOIN (
-		SELECT
-			DISTINCT env,
-			metric_name,
-			JSONExtractString(labels,
-			'service_name') AS service_name,
-			anyLast(fingerprint) AS fingerprint
+			k8s_namespace_name,
+			countIf(last_phase = 1) AS Pending,
+			countIf(last_phase = 2) AS Running,
+			countIf(last_phase = 3) AS Succeeded,
+			countIf(last_phase = 4) AS Failed,
+			countIf(last_phase = 5) AS Unknown
 		FROM
-			signoz_metrics.time_series_v4_1day
-		WHERE
-			metric_name NOT LIKE 'signoz_%'
-			AND (unix_milli >= intDiv(123123123123,
-			86400000) * 86400000)
-			AND (unix_milli < 2311231231231)
+			(
+			SELECT
+				k8s_pod_name,
+				k8s_namespace_name,
+				now() AS ts,
+				anyLast(value) AS last_phase
+			FROM
+				signoz_metrics.distributed_samples_v4
+			INNER JOIN (
+				SELECT
+					DISTINCT JSONExtractString(labels,
+					'k8s_pod_name') AS k8s_pod_name,
+					JSONExtractString(labels,
+					'k8s_namespace_name') AS k8s_namespace_name,
+					JSONExtractString(labels,
+					'k8s_cluster_name') AS k8s_cluster_name,
+					fingerprint
+				FROM
+					signoz_metrics.time_series_v4_1day
+				WHERE
+					(metric_name = 'k8s_pod_phase')
+					AND (temporality = 'Unspecified')
+					AND JSONExtractString(labels,
+					'k8s_cluster_name') = $k8s_cluster_name
+					AND JSONExtractString(labels,
+					'k8s_namespace_name') IN $k8s_namespace_name) AS filtered_time_series
+					USING fingerprint
+			WHERE
+				(metric_name = 'k8s_pod_phase')
+				AND (unix_milli >= $start_timestamp_ms)
+				AND (unix_milli < $end_timestamp_ms)
+			GROUP BY
+				k8s_pod_name,
+				k8s_namespace_name,
+				ts
+			ORDER BY
+				k8s_namespace_name ASC,
+				k8s_pod_name ASC,
+				ts ASC)
 		GROUP BY
-			env,
-			metric_name,
-			service_name) AS filtered_time_series
-			USING fingerprint
-	WHERE
-		unix_milli >= (toUnixTimestamp(now() - toIntervalMinute(30)) * 1000) WINDOW rate_window as ( PARTITION BY fingerprint
-	ORDER BY
-		fingerprint,
-		unix_milli))
-WHERE
-	diff > 0
-GROUP BY
-	env,
-	metric_name,
-	service_name
-ORDER BY
-	env,
-	metric_name,
-	service_name`,
+			k8s_namespace_name
+		ORDER BY
+			Running DESC`,
 			metricResult: []helpers.MetricResult{{
 				NormToUnNormAttrMap: map[string]string{
 					"service_name":           "service.name",
 					"container_memory_usage": "container.memory.usage",
+					"k8s_namespace_name":     "k8s.namespace.name",
+					"k8s_pod_name":           "k8s.pod.name",
+					"k8s_cluster_name":       "k8s.cluster.name",
 				},
-				NormMetricName:   "container_memory_usage",
-				UnNormMetricName: "container.memory.usage",
+				NormMetricName:   "k8s_pod_phase",
+				UnNormMetricName: "k8s.pod.phase",
 			}},
-			want: "SELECT env AS \"Deployment Environment\", metric_name AS \"Noramalized Metric Name\", `service.name` AS \"Service Name\", if(ceiling(divide(min(diff), 1000)) > 86400000, -1, ceiling(divide(min(diff), 1000))) AS max_diff_in_secs FROM (SELECT env, metric_name, `service.name`, unix_milli - lagInFrame(unix_milli, 1, 0) OVER rate_window AS diff FROM signoz_metrics.distributed_samples_v4 INNER JOIN (SELECT DISTINCT env, metric_name, JSONExtractString(labels, 'service.name') AS `service.name`, anyLast(fingerprint) AS fingerprint FROM signoz_metrics.time_series_v4_1day WHERE metric_name NOT LIKE 'signoz_%' AND (unix_milli >= intDiv(123123123123, 86400000) * 86400000) AND (unix_milli < 2311231231231) GROUP BY env, metric_name, `service.name`) AS filtered_time_series USING fingerprint WHERE unix_milli >= (toUnixTimestamp(now() - toIntervalMinute(30)) * 1000) WINDOW rate_window as ( PARTITION BY fingerprint ORDER BY fingerprint, unix_milli)) WHERE diff > 0 GROUP BY env, metric_name, `service.name` ORDER BY env, metric_name, `service.name`",
+			want: "SELECT `k8s.namespace.name`, countIf(last_phase = 1) AS Pending, countIf(last_phase = 2) AS Running, countIf(last_phase = 3) AS Succeeded, countIf(last_phase = 4) AS Failed, countIf(last_phase = 5) AS Unknown FROM (SELECT `k8s.pod.name`, `k8s.namespace.name`, now() AS ts, anyLast(value) AS last_phase FROM signoz_metrics.distributed_samples_v4 INNER JOIN (SELECT DISTINCT JSONExtractString(labels, 'k8s.pod.name') AS `k8s.pod.name`, JSONExtractString(labels, 'k8s.namespace.name') AS `k8s.namespace.name`, JSONExtractString(labels, 'k8s.cluster.name') AS `k8s.cluster.name`, fingerprint FROM signoz_metrics.time_series_v4_1day WHERE (metric_name = 'k8s.pod.phase') AND (temporality = 'Unspecified') AND JSONExtractString(labels, 'k8s.cluster.name') = $k8s.cluster.name AND JSONExtractString(labels, 'k8s.namespace.name') IN $k8s.namespace.name) AS filtered_time_series USING fingerprint WHERE (metric_name = 'k8s.pod.phase') AND (unix_milli >= $start_timestamp_ms) AND (unix_milli < $end_timestamp_ms) GROUP BY `k8s.pod.name`, `k8s.namespace.name`, ts ORDER BY `k8s.namespace.name` ASC, `k8s.pod.name` ASC, ts ASC) GROUP BY `k8s.namespace.name` ORDER BY Running DESC",
 		},
 	}
 
