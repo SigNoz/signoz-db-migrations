@@ -63,16 +63,27 @@ func needsQuoting(_ string) bool {
 }
 
 func (v *NameReplacementVisitor) transformIdentifier(ident *parser.Ident) {
-	if newName, exists := v.mappings[ident.Name]; exists {
-		ident.Name = newName
-		if needsQuoting(newName) {
-			ident.QuoteType = parser.BackTicks
+	if strings.HasPrefix(ident.Name, "$") {
+		name := strings.TrimPrefix(ident.Name, "$")
+		if newName, ok := v.mappings[name]; ok {
+			ident.Name = "$" + newName
 		}
-	}
-	if newName, exists := v.attrMap[ident.Name]; exists {
-		ident.Name = newName
-		if needsQuoting(newName) {
-			ident.QuoteType = parser.BackTicks
+		if newName, ok := v.attrMap[ident.Name]; ok {
+			ident.Name = "$" + newName
+		}
+
+	} else {
+		if newName, exists := v.mappings[ident.Name]; exists {
+			ident.Name = newName
+			if needsQuoting(newName) {
+				ident.QuoteType = parser.BackTicks
+			}
+		}
+		if newName, exists := v.attrMap[ident.Name]; exists {
+			ident.Name = newName
+			if needsQuoting(newName) {
+				ident.QuoteType = parser.BackTicks
+			}
 		}
 	}
 }
