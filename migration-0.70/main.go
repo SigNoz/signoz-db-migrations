@@ -860,11 +860,11 @@ func checkAllAttributesOfTwoMetrics(
 	conn clickhouse.Conn,
 	metricNormTrue, metricNormFalse string,
 ) (
-// map each rawTrue key → all rawFalse keys with the same cleaned key
+	// map each rawTrue key → all rawFalse keys with the same cleaned key
 	normAttrsToUnNormAttrs map[string]string,
-// original keys present only in metricTrue
+	// original keys present only in metricTrue
 	keysPresentInNormMetric []string,
-// original keys present only in metricFalse
+	// original keys present only in metricFalse
 	keysPresentInUnNormMetric []string,
 	err error,
 ) {

@@ -68,7 +68,7 @@ func (v *NameReplacementVisitor) transformIdentifier(ident *parser.Ident) {
 		if newName, ok := v.mappings[name]; ok {
 			ident.Name = "$" + newName
 		}
-		if newName, ok := v.attrMap[ident.Name]; ok {
+		if newName, ok := v.attrMap[name]; ok {
 			ident.Name = "$" + newName
 		}
 
