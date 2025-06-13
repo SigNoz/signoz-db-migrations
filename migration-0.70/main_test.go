@@ -284,6 +284,16 @@ func TestTransformClickHouseQuery(t *testing.T) {
 			want: "SELECT arrayJoin(`k8s.pod.names`) AS pod_name FROM signoz_metrics.distributed_time_series_v4 WHERE metric_name = 'container.memory.usage'",
 		},
 		{
+			name:  "inter dependent variable query",
+			input: `SELECT name FROM signoz_traces.signoz_index_v3 WHERE serviceName = $service_name AND spanKind = 'Server' GROUP BY name`,
+			metricResult: []helpers.MetricResult{{
+				NormToUnNormAttrMap: map[string]string{
+					"service_name": "service.name",
+				},
+			}},
+			want: `SELECT name FROM signoz_traces.signoz_index_v3 WHERE serviceName = $service.name AND spanKind = 'Server' GROUP BY name`,
+		},
+		{
 			name: "clickhouse complex query",
 			input: `SELECT
 			k8s_namespace_name,

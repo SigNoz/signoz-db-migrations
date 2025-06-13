@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -56,13 +55,13 @@ type ts struct {
 }
 
 type metricSample struct {
-	env         string                         `ch:"env"`
-	temporality pmetric.AggregationTemporality `ch:"temporality"`
-	metricName  string                         `ch:"metric_name"`
-	fingerprint uint64                         `ch:"fingerprint"`
-	unixMilli   int64                          `ch:"unix_milli"`
-	value       float64                        `ch:"value"`
-	flags       uint32                         `ch:"flags"`
+	env         string  `ch:"env"`
+	temporality string  `ch:"temporality"`
+	metricName  string  `ch:"metric_name"`
+	fingerprint uint64  `ch:"fingerprint"`
+	unixMilli   int64   `ch:"unix_milli"`
+	value       float64 `ch:"value"`
+	flags       uint32  `ch:"flags"`
 }
 
 func getClickhouseConn(pool int) (clickhouse.Conn, error) {
@@ -159,25 +158,23 @@ func migrateHighRetention(maxOpenConns, workers int) error {
 		return fmt.Errorf("error getting last timestamp: %w", err)
 	}
 
-	reader := bufio.NewReader(os.Stdin)
 	if firstTS < lastTS {
-		fmt.Printf("Migrate data [%d…%d]? (yes): ", firstTS, lastTS)
-		input, _ := reader.ReadString('\n')
-		if strings.TrimSpace(input) != "yes" {
-			return nil
-		}
 		resAttrs, scopeAttrs, pointAttrs, err := getAllDifferentMetricsAttributes(conn)
 		if err != nil {
 			return fmt.Errorf("error getting all attributes: %w", err)
 		}
 		g, ctx := errgroup.WithContext(context.Background())
 		sem := make(chan struct{}, workers)
-		for t := firstTS; t < lastTS; t += 3600 {
-			start, end := t, min(t+3600, lastTS)
+		for t := firstTS; t < lastTS; t += 3600000 {
+			start, end := t, min(t+3600000, lastTS)
 			sem <- struct{}{}
+
+			startCopy := start
+			endCopy := end
 			g.Go(func() error {
 				defer func() { <-sem }()
-				return fetchAndInsertTimeSeriesV4(ctx, conn, start, end, metricDetails, resAttrs, scopeAttrs, pointAttrs)
+				cliCtx := cappedCHContext(ctx)
+				return fetchAndInsertTimeSeriesV4(cliCtx, conn, startCopy, endCopy, metricDetails, resAttrs, scopeAttrs, pointAttrs)
 			})
 		}
 		if err := g.Wait(); err != nil {
@@ -600,24 +597,29 @@ func fetchAndInsertTimeSeriesV4(ctx context.Context, conn clickhouse.Conn, start
 	}
 
 	querySamples := fmt.Sprintf(`
-		    SELECT
-        env,
-        temporality,
-        metric_name,
-        fingerprint,
-        unix_milli,
-        value,
-        flags
-    FROM %s.%s
-    WHERE fingerprint IN GLOBAl (
-        SELECT fingerprint
-        FROM %s.%s
-        WHERE __normalized = true
-          AND unix_milli >= ? AND unix_milli < ?
-    )
-      AND unix_milli >= ? AND unix_milli < ?`,
+SELECT
+	env,
+	temporality,
+	metric_name,
+	fingerprint,
+	unix_milli,
+	value,
+	flags
+FROM
+	%s.%s
+WHERE
+	unix_milli >= ?
+	AND unix_milli < ? AND
+	fingerprint GLOBAL IN (SELECT
+		fingerprint
+	FROM
+		%s.%s
+	WHERE
+		__normalized = true
+		AND unix_milli >= ?
+		AND unix_milli < ?);`,
 		signozMetricDBName, signozSampleTableName, signozMetricDBName, signozTSTableNameV4)
-
+	zap.L().Info("query args", zap.Int64("start", start), zap.Int64("end", end))
 	rowsSamples, err := conn.Query(ctx, querySamples, start, end, start, end)
 	if err != nil {
 		return fmt.Errorf("samples query: %w", err)
@@ -685,7 +687,7 @@ func fetchAndInsertTimeSeriesV4(ctx context.Context, conn clickhouse.Conn, start
 			return fmt.Errorf("final samples flush: %w", err)
 		}
 	}
-	//log.Printf("migration success for windows start: %v, and end: %v", start, end)
+	zap.L().Info(fmt.Sprintf("migration success for windows start: %v, and end: %v", start, end))
 	return nil
 }
 
@@ -860,11 +862,11 @@ func checkAllAttributesOfTwoMetrics(
 	conn clickhouse.Conn,
 	metricNormTrue, metricNormFalse string,
 ) (
-	// map each rawTrue key → all rawFalse keys with the same cleaned key
+// map each rawTrue key → all rawFalse keys with the same cleaned key
 	normAttrsToUnNormAttrs map[string]string,
-	// original keys present only in metricTrue
+// original keys present only in metricTrue
 	keysPresentInNormMetric []string,
-	// original keys present only in metricFalse
+// original keys present only in metricFalse
 	keysPresentInUnNormMetric []string,
 	err error,
 ) {
@@ -1013,7 +1015,7 @@ func (m *DashAlertsMigrator) migrateDashboards(
 	defer rows.Close()
 
 	type row struct {
-		id   interface{}
+		id   string
 		data []byte
 	}
 	var toUpdate []row
@@ -1032,7 +1034,7 @@ func (m *DashAlertsMigrator) migrateDashboards(
 		}
 
 		// apply only the dashboard-specific paths
-		err := m.applyReplacementsToDashboard(dash, metricMap, attrMap, replacers)
+		err := m.applyReplacementsToDashboard(dash, metricMap, attrMap, replacers, r.id)
 		if err != nil {
 			zap.L().Error(fmt.Sprintf("error getting for dashboard-id: %v, for error  - %v for file name - %v", r.id, err, copyDB))
 			continue
@@ -1230,12 +1232,7 @@ func replacePlaceholders(query string, vars map[string]string) string {
 	return query
 }
 
-func (m *DashAlertsMigrator) applyReplacementsToDashboard(
-	dash map[string]interface{},
-	metricMap map[string]helpers.MetricResult,
-	attrMap map[string]string,
-	replacers []replacer,
-) error {
+func (m *DashAlertsMigrator) applyReplacementsToDashboard(dash map[string]interface{}, metricMap map[string]helpers.MetricResult, attrMap map[string]string, replacers []replacer, id string) error {
 
 	if migrated, ok := dash["dotMigrated"].(bool); ok && migrated {
 		return nil
@@ -1431,7 +1428,7 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 			for _, wRaw := range wArr {
 				if wi, ok := wRaw.(map[string]interface{}); ok {
 					if err := processWidget(wi); err != nil {
-						zap.L().Error(fmt.Sprintf("⚠️ skipping widget due to error: %v", err))
+						zap.L().Error(fmt.Sprintf("⚠️ skipping widget due to error: %v, for dashboards - %v", err, id))
 						continue
 					}
 				}
@@ -1445,7 +1442,7 @@ func (m *DashAlertsMigrator) applyReplacementsToDashboard(
 			for _, vRaw := range pm {
 				if wi, ok := vRaw.(map[string]interface{}); ok {
 					if err := processWidget(wi); err != nil {
-						zap.L().Error(fmt.Sprintf("⚠️ skipping panel due to error: %v", err))
+						zap.L().Error(fmt.Sprintf("⚠️ skipping panel due to error: %v, for dashboards - %v", err, id))
 						continue
 					}
 				}
@@ -1498,7 +1495,7 @@ func (m *DashAlertsMigrator) migrateRules(
 	defer rows.Close()
 
 	type ruleRow struct {
-		id   interface{}
+		id   string
 		data []byte
 	}
 	var toUpdate []ruleRow
@@ -1517,7 +1514,7 @@ func (m *DashAlertsMigrator) migrateRules(
 		}
 
 		// only mutate promQueries, chQueries, builder.queryData where dataSource=="metrics"
-		err := m.applyReplacementsToAlert(alertObj, metricMap, attrMap, replacers)
+		err := m.applyReplacementsToAlert(alertObj, metricMap, attrMap, replacers, r.id)
 		if err != nil {
 			zap.L().Error(fmt.Sprintf("error getting for alert-id: %v, for error  - %v", r.id, err))
 			continue
@@ -1560,12 +1557,7 @@ func (m *DashAlertsMigrator) migrateRules(
 	return nil
 }
 
-func (m *DashAlertsMigrator) applyReplacementsToAlert(
-	alert map[string]interface{},
-	metricMap map[string]helpers.MetricResult,
-	attrMap map[string]string,
-	replacers []replacer,
-) error {
+func (m *DashAlertsMigrator) applyReplacementsToAlert(alert map[string]interface{}, metricMap map[string]helpers.MetricResult, attrMap map[string]string, replacers []replacer, id string) error {
 
 	if migrated, ok := alert["dotMigrated"].(bool); ok && migrated {
 		return nil
@@ -1600,11 +1592,13 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 						qr = helpers.ConvertTemplateToNamedParams(qr)
 						metrics, err := helpers.ExtractPromMetrics(qr, metricMap)
 						if err != nil {
-							return err
+							zap.L().Error(fmt.Sprintf("error in prom queries , err: %v for alert id: %v", err, id))
+							continue
 						}
 						entry["query"], err = helpers.TransformPromQLQuery(qr, metrics)
 						if err != nil {
-							return err
+							zap.L().Error(fmt.Sprintf("error in prom queries , err: %v for alert id: %v", err, id))
+							continue
 						}
 					}
 					if q, ok := entry["legend"].(string); ok && q != "" {
@@ -1625,7 +1619,8 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 							query := helpers.ConvertTemplateToNamedParams(q)
 							metrics, err := helpers.ExtractMetrics(query, metricMap)
 							if err != nil {
-								return err
+								zap.L().Error(fmt.Sprintf("error in ch queries , err: %v for alert id: %v", err, id))
+								continue
 							}
 							var metricResults []helpers.MetricResult
 							for _, metric := range metrics {
@@ -1633,7 +1628,8 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 							}
 							entry["query"], err = m.queryTransformer.TransformQuery(query, metricResults, attrMap)
 							if err != nil {
-								return err
+								zap.L().Error(fmt.Sprintf("error in ch queries , err: %v for alert id: %v", err, id))
+								continue
 							}
 						}
 					}
@@ -1747,11 +1743,9 @@ func (m *DashAlertsMigrator) applyReplacementsToAlert(
 						if err := json.Unmarshal([]byte(twice), &embedded); err == nil {
 							// apply same transformations to embedded.compositeQuery
 							if emap, ok := embedded.(map[string]interface{}); ok {
-								err := m.applyReplacementsToAlert(
-									map[string]interface{}{"condition": map[string]interface{}{"compositeQuery": emap}},
-									metricMap, attrMap, replacers,
-								)
+								err := m.applyReplacementsToAlert(map[string]interface{}{"condition": map[string]interface{}{"compositeQuery": emap}}, metricMap, attrMap, replacers, "")
 								if err != nil {
+									zap.L().Error(fmt.Sprintf("error in builder queries url, err: %v for alert id: %v", err, id))
 									return err
 								}
 								if newBytes, err := json.Marshal(emap); err == nil {
