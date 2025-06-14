@@ -6,10 +6,12 @@ require (
 	github.com/AfterShip/clickhouse-sql-parser v0.4.9
 	github.com/ClickHouse/clickhouse-go/v2 v2.34.0
 	github.com/SigNoz/signoz-otel-collector v0.111.41
+	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/mattn/go-sqlite3 v1.14.28
 	github.com/prometheus/prometheus v0.54.1
 	go.opentelemetry.io/collector/component v0.111.0
 	go.opentelemetry.io/collector/pdata v1.31.0
+	go.uber.org/zap v1.27.0
 	golang.org/x/sync v0.13.0
 )
 
@@ -45,7 +47,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.35.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/net v0.39.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/text v0.24.0 // indirect

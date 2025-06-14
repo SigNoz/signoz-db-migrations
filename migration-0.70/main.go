@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/cenkalti/backoff/v4"
 	"io"
 	"log"
 	"net/url"
@@ -17,6 +18,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -116,7 +119,6 @@ func commonPreRun(maxOpenConns int) (clickhouse.Conn, map[string]helpers.MetricR
 		if v, ok := notFoundMetricsMap[m]; ok {
 			metrics[m] = v
 		} else {
-			conn.Close()
 			missingMetrics = append(missingMetrics, m)
 		}
 	}
@@ -148,15 +150,21 @@ func migrateHighRetention(maxOpenConns, workers int) error {
 	}
 	defer conn.Close()
 
-	// get timestamps
-	firstTS, err := getFirstTimeStampforNormalizedData(conn)
-	if err != nil {
-		return fmt.Errorf("error getting first timestamp: %w", err)
+	firstTS := int64(helpers.EnvOrInt("FIRST_TS", 0))
+	if firstTS == 0 {
+		firstTS, err = getFirstTimeStampforNormalizedData(conn)
+		if err != nil {
+			return fmt.Errorf("error getting first timestamp: %w", err)
+		}
 	}
-	lastTS, err := getfirstTimeStampforNonNormalizedData(conn)
-	if err != nil {
-		return fmt.Errorf("error getting last timestamp: %w", err)
+	lastTS := int64(helpers.EnvOrInt("LAST_TS", 0))
+	if lastTS == 0 {
+		lastTS, err = getfirstTimeStampforNonNormalizedData(conn)
+		if err != nil {
+			return fmt.Errorf("error getting last timestamp: %w", err)
+		}
 	}
+	var failedWindows atomic.Int32
 
 	if firstTS < lastTS {
 		resAttrs, scopeAttrs, pointAttrs, err := getAllDifferentMetricsAttributes(conn)
@@ -165,16 +173,45 @@ func migrateHighRetention(maxOpenConns, workers int) error {
 		}
 		g, ctx := errgroup.WithContext(context.Background())
 		sem := make(chan struct{}, workers)
-		for t := firstTS; t < lastTS; t += 3600000 {
-			start, end := t, min(t+3600000, lastTS)
-			sem <- struct{}{}
+		for end := lastTS; end > firstTS; end -= 3600000 {
+			start := end - 3600000
+			if start < firstTS { // clamp the very first (oldest) window
+				start = firstTS
+			}
 
-			startCopy := start
+			sem <- struct{}{} // concurrency limiter
+
+			startCopy := start // capture loop vars
 			endCopy := end
 			g.Go(func() error {
+
+				var attempt uint64
 				defer func() { <-sem }()
-				cliCtx := cappedCHContext(ctx)
-				return fetchAndInsertTimeSeriesV4(cliCtx, conn, startCopy, endCopy, metricDetails, resAttrs, scopeAttrs, pointAttrs)
+
+				operation := func() error {
+					cliCtx := cappedCHContext(ctx)
+					return fetchAndInsertTimeSeriesV4(
+						cliCtx, conn,
+						startCopy, endCopy,
+						metricDetails, resAttrs, scopeAttrs, pointAttrs,
+					)
+				}
+
+				notify := func(err error, delay time.Duration) {
+					attempt++
+					log.Printf("[window %d–%d] attempt %d failed: %v – next retry in %s",
+						startCopy, endCopy, attempt, err, delay)
+				}
+
+				bo := backoff.NewExponentialBackOff()
+				bo.MaxElapsedTime = 5 * time.Minute
+				bo.InitialInterval = 2 * time.Second
+				if err := backoff.RetryNotify(operation, backoff.WithContext(bo, ctx), notify); err != nil {
+					// All retries exhausted for this window
+					failedWindows.Add(1)
+					log.Printf("[window %d–%d] permanently failed after back-off: %v", startCopy, endCopy, err)
+				}
+				return nil
 			})
 		}
 		if err := g.Wait(); err != nil {
@@ -432,7 +469,7 @@ func fetchAndInsertTimeSeriesV4(ctx context.Context, conn clickhouse.Conn, start
 		FROM %s.%s
 		WHERE __normalized = true
 		  AND unix_milli >= ? AND  unix_milli < ?
-		ORDER BY unix_milli`,
+		ORDER BY unix_milli DESC`,
 		signozMetricDBName, signozTSTableNameV4)
 
 	rowsTS, err := conn.Query(ctx, queryTS, start, end)
@@ -608,8 +645,8 @@ SELECT
 FROM
 	%s.%s
 WHERE
-	unix_milli >= ?
-	AND unix_milli < ? AND
+	unix_milli > ?
+	AND unix_milli <= ? AND
 	fingerprint GLOBAL IN (SELECT
 		fingerprint
 	FROM
@@ -617,10 +654,11 @@ WHERE
 	WHERE
 		__normalized = true
 		AND unix_milli >= ?
-		AND unix_milli < ?);`,
+		AND unix_milli <= ?) ORDER BY unix_milli DESC;`,
 		signozMetricDBName, signozSampleTableName, signozMetricDBName, signozTSTableNameV4)
 	zap.L().Info("query args", zap.Int64("start", start), zap.Int64("end", end))
-	rowsSamples, err := conn.Query(ctx, querySamples, start, end, start, end)
+	tsStart, tsEnd := AlignToHour(start, end)
+	rowsSamples, err := conn.Query(ctx, querySamples, start, end, tsStart, tsEnd)
 	if err != nil {
 		return fmt.Errorf("samples query: %w", err)
 	}
@@ -693,6 +731,18 @@ WHERE
 
 /* ----------------- helpers -------------------------------------------- */
 
+func AlignToHour(startMs, endMs int64) (adjStartMs, adjEndMs int64) {
+	const hourMs = int64(time.Hour / time.Millisecond) // 3 600 000
+
+	// Round down: integer division truncates toward zero → floor
+	adjStartMs = (startMs / hourMs) * hourMs
+
+	// Round up: add hour-1 before division to simulate ceil
+	adjEndMs = ((endMs + hourMs - 1) / hourMs) * hourMs
+
+	return
+}
+
 // attrsToPMap converts a plain map[string]string to pcommon.Map.
 func attrsToPMap(src map[string]string) pcommon.Map {
 	dst := pcommon.NewMap()
@@ -755,7 +805,27 @@ func getFirstTimeStampforNormalizedData(conn clickhouse.Conn) (int64, error) {
 }
 
 func getfirstTimeStampforNonNormalizedData(conn clickhouse.Conn) (int64, error) {
-	query := fmt.Sprintf(`select min(unix_milli) from %s.%s where __normalized = false`, signozMetricDBName, signozTSTableNameV4)
+	query := fmt.Sprintf(`with 
+(
+select min(unix_milli) as unix_milli from %s.%s where __normalized = false 
+) as lastTS
+
+select
+	min(unix_milli)
+from
+	%s.%s
+where
+	 unix_milli >= (lastTS - 3600000)
+	and unix_milli <= (lastTS + 3600000)
+	and
+	fingerprint global in (
+	select
+		fingerprint
+	from
+		%s.%s
+	where
+		__normalized = false
+		and unix_milli<= (lastTS + 3600000)) `, signozMetricDBName, signozTSTableNameV4, signozMetricDBName, signozSampleTableName, signozMetricDBName, signozTSTableNameV4)
 	ctx := cappedCHContext(context.Background())
 	rows, err := conn.Query(ctx, query)
 	if err != nil {

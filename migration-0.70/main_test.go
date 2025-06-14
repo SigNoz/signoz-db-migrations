@@ -130,11 +130,11 @@ func TestTransformPromQLQuery(t *testing.T) {
 		},
 		{
 			name:  "binary matching on underscore",
-			input: `(system_memory_usage{k8s_cluster_name="$k8s_cluster_name",k8s_node_name="$k8s_node_name",state=~"buffered|cached|free|used"})`,
+			input: `max by (k8s_hpa_name) (  k8s_hpa_desired_replicas == bool on (k8s_hpa_name) k8s_hpa_max_replicas  )`,
 			metricResult: []helpers.MetricResult{{
-				NormToUnNormAttrMap: map[string]string{"k8s_cluster_name": "k8s.cluster.name", "k8s_node_name": "k8s.node.name"},
-				NormMetricName:      "system_memory_usage",
-				UnNormMetricName:    "system.memory.usage",
+				NormToUnNormAttrMap: map[string]string{"k8s_hpa_name": "k8s.hpa.name", "k8s_hpa_max_replicas": "k8s.hpa.max_replicas"},
+				NormMetricName:      "k8s_hpa_desired_replicas",
+				UnNormMetricName:    "k8s.hpa.desired_replicas",
 			}},
 			want: `({"system.memory.usage","k8s.cluster.name"="$k8s.cluster.name","k8s.node.name"="$k8s.node.name",state=~"buffered|cached|free|used"})`,
 		},
